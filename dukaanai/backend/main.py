@@ -35,6 +35,19 @@ def get_db():
     return conn
 
 
+def ensure_shop_columns(cur):
+    cols = {row["name"] for row in cur.execute("PRAGMA table_info(shop_status)").fetchall()}
+    migrations = {
+        "phone": "ALTER TABLE shop_status ADD COLUMN phone TEXT NOT NULL DEFAULT ''",
+        "gstin": "ALTER TABLE shop_status ADD COLUMN gstin TEXT NOT NULL DEFAULT ''",
+        "address": "ALTER TABLE shop_status ADD COLUMN address TEXT NOT NULL DEFAULT ''",
+        "low_stock_threshold": "ALTER TABLE shop_status ADD COLUMN low_stock_threshold INTEGER NOT NULL DEFAULT 5",
+    }
+    for col_name, sql in migrations.items():
+        if col_name not in cols:
+            cur.execute(sql)
+
+
 def init_db():
     conn = get_db()
     cur = conn.cursor()
@@ -46,7 +59,11 @@ def init_db():
         owner_name TEXT NOT NULL DEFAULT '',
         is_open INTEGER NOT NULL DEFAULT 1,
         opening_cash REAL NOT NULL DEFAULT 0,
-        is_configured INTEGER NOT NULL DEFAULT 0
+        is_configured INTEGER NOT NULL DEFAULT 0,
+        phone TEXT NOT NULL DEFAULT '',
+        gstin TEXT NOT NULL DEFAULT '',
+        address TEXT NOT NULL DEFAULT '',
+        low_stock_threshold INTEGER NOT NULL DEFAULT 5
     );
 
     CREATE TABLE IF NOT EXISTS products (
@@ -79,10 +96,14 @@ def init_db():
     );
     """)
 
+    ensure_shop_columns(cur)
+
     cur.execute("SELECT COUNT(*) FROM shop_status")
     if cur.fetchone()[0] == 0:
         cur.execute(
-            "INSERT INTO shop_status (id, shop_name, owner_name, is_open, opening_cash, is_configured) VALUES (1, '', '', 1, 0, 0)"
+            """INSERT INTO shop_status
+               (id, shop_name, owner_name, is_open, opening_cash, is_configured, phone, gstin, address, low_stock_threshold)
+               VALUES (1, '', '', 1, 0, 0, '', '', '', 5)"""
         )
 
     conn.commit()
@@ -97,6 +118,20 @@ class SetupStoreRequest(BaseModel):
     shop_name: str
     owner_name: str
     opening_cash: float = 0.0
+    phone: str = ""
+    gstin: str = ""
+    address: str = ""
+    low_stock_threshold: int = 5
+
+
+class UpdateProfileRequest(BaseModel):
+    shop_name: str
+    owner_name: str
+    phone: str = ""
+    gstin: str = ""
+    address: str = ""
+    opening_cash: float = 0.0
+    low_stock_threshold: int = 5
 
 
 class SaleItem(BaseModel):
@@ -110,6 +145,7 @@ class CreateSaleRequest(BaseModel):
     items: List[SaleItem]
     payment_method: str
     customer_id: Optional[int] = None
+    customer_name: Optional[str] = ""
     due_date: Optional[str] = ""
 
 
@@ -157,10 +193,6 @@ def get_gemini_client():
 
 
 def parse_voice_with_fallback(transcript: str, products: list, customers: list) -> dict:
-    """
-    Uses Gemini API when GEMINI_API_KEY is configured, with a deterministic NLP parser
-    fallback so voice-to-transaction conversion works immediately out of the box.
-    """
     client = get_gemini_client()
     product_names = [f"{p['name']} (₹{p['price']}/{p['unit']})" for p in products]
     customer_names = [c["name"] for c in customers]
@@ -196,15 +228,13 @@ def parse_voice_with_fallback(transcript: str, products: list, customers: list) 
         except Exception:
             pass
 
-    # Deterministic rule-based fallback parser
     text = transcript.lower().strip()
     amount_match = re.search(r"(?:₹|rs\.?|rupees)?\s*(\d+(?:\.\d+)?)", text)
-    qty_match = re.search(r"(\d+)\s*(?:kg|kilo|packet|packets|litre|liter|l|pcs|pieces|unit|units|x)", text)
+    qty_match = re.search(r"(\d+)\s*(?:kg|kilo|packet|packets|litre|liter|l|pcs|pieces|unit|units|x)\b", text)
 
     qty = int(qty_match.group(1)) if qty_match else 1
     extracted_amount = float(amount_match.group(1)) if amount_match else 0.0
 
-    # Payment method
     if "upi" in text or "gpay" in text or "phonepe" in text or "online" in text or "paytm" in text:
         pay_method = "UPI"
     elif "credit" in text or "udhaar" in text or "udhar" in text or "khata" in text:
@@ -212,21 +242,26 @@ def parse_voice_with_fallback(transcript: str, products: list, customers: list) 
     else:
         pay_method = "Cash"
 
-    # Match customer
     matched_cust = None
     for c in customers:
         if c["name"].lower() in text:
             matched_cust = c["name"]
             break
 
-    # Match product
+    if not matched_cust:
+        name_match = re.search(r"(?:to|from|for|customer)\s+([a-zA-Z][a-zA-Z\s]{1,25}?)(?:\s+(?:for|on|of|udhaar|udhar|credit|cash|upi|rs|rupees|₹|\d)|$)", transcript, re.IGNORECASE)
+        if name_match:
+            candidate = name_match.group(1).strip()
+            stop_words = {"sale", "cash", "upi", "credit", "udhaar", "udhar", "expense", "rent", "electricity", "rice", "sugar", "milk", "oil", "tea"}
+            if candidate.lower() not in stop_words:
+                matched_cust = candidate.title()
+
     matched_prod = None
     for p in products:
         if p["name"].lower() in text:
             matched_prod = p
             break
 
-    # Determine transaction type
     if any(w in text for w in ["expense", "paid for", "electricity", "bill", "rent", "transport", "salary", "repair", "spent"]):
         cat = "Electricity" if "electricity" in text or "power" in text else ("Rent" if "rent" in text else "Others")
         return {
@@ -252,7 +287,6 @@ def parse_voice_with_fallback(transcript: str, products: list, customers: list) 
             "customer_name": matched_cust,
         }
 
-    # Default: Sale
     if matched_prod:
         final_amt = extracted_amount if (extracted_amount > 0 and not qty_match) else (matched_prod["price"] * qty)
         if extracted_amount > 0 and qty_match and extracted_amount != qty:
@@ -301,14 +335,13 @@ def execute_parsed_transaction(parsed: dict) -> dict:
 
     customer_id = None
     if cust_name:
-        row = cur.execute("SELECT id, total_credit, paid, due_date FROM customers WHERE LOWER(name) = LOWER(?)", (cust_name,)).fetchone()
+        row = cur.execute("SELECT id, total_credit, paid, due_date FROM customers WHERE LOWER(name) = LOWER(?)", (cust_name.strip(),)).fetchone()
         if row:
             customer_id = row["id"]
         elif tx_type == "sale" and pay_method == "Credit":
-            # Automatically create customer if spoken during a Credit sale
             cur.execute(
                 "INSERT INTO customers (name, phone, total_credit, paid, due_date) VALUES (?, '', 0, 0, ?)",
-                (cust_name.title(), (now + timedelta(days=7)).strftime("%d %b")),
+                (cust_name.strip().title(), (now + timedelta(days=7)).strftime("%d %b")),
             )
             customer_id = cur.lastrowid
 
@@ -379,9 +412,45 @@ def setup_shop(payload: SetupStoreRequest):
     cur = conn.cursor()
     cur.execute(
         """UPDATE shop_status
-           SET shop_name = ?, owner_name = ?, opening_cash = ?, is_open = 1, is_configured = 1
+           SET shop_name = ?, owner_name = ?, opening_cash = ?, phone = ?, gstin = ?, address = ?,
+               low_stock_threshold = ?, is_open = 1, is_configured = 1
            WHERE id = 1""",
-        (payload.shop_name.strip(), payload.owner_name.strip(), payload.opening_cash),
+        (
+            payload.shop_name.strip(),
+            payload.owner_name.strip(),
+            payload.opening_cash,
+            payload.phone.strip(),
+            payload.gstin.strip(),
+            payload.address.strip(),
+            max(1, int(payload.low_stock_threshold or 5)),
+        ),
+    )
+    conn.commit()
+    shop = dict(cur.execute("SELECT * FROM shop_status WHERE id = 1").fetchone())
+    conn.close()
+    return shop
+
+
+@app.post("/api/shop/profile")
+def update_profile(payload: UpdateProfileRequest):
+    if not payload.shop_name.strip() or not payload.owner_name.strip():
+        raise HTTPException(status_code=400, detail="Shop name and owner name are required")
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        """UPDATE shop_status
+           SET shop_name = ?, owner_name = ?, phone = ?, gstin = ?, address = ?,
+               opening_cash = ?, low_stock_threshold = ?, is_configured = 1
+           WHERE id = 1""",
+        (
+            payload.shop_name.strip(),
+            payload.owner_name.strip(),
+            payload.phone.strip(),
+            payload.gstin.strip(),
+            payload.address.strip(),
+            payload.opening_cash,
+            max(1, int(payload.low_stock_threshold or 5)),
+        ),
     )
     conn.commit()
     shop = dict(cur.execute("SELECT * FROM shop_status WHERE id = 1").fetchone())
@@ -397,7 +466,10 @@ def reset_all_data():
         DELETE FROM transactions;
         DELETE FROM customers;
         DELETE FROM products;
-        UPDATE shop_status SET shop_name = '', owner_name = '', is_open = 1, opening_cash = 0, is_configured = 0 WHERE id = 1;
+        UPDATE shop_status
+           SET shop_name = '', owner_name = '', is_open = 1, opening_cash = 0, is_configured = 0,
+               phone = '', gstin = '', address = '', low_stock_threshold = 5
+         WHERE id = 1;
     """)
     conn.commit()
     conn.close()
@@ -424,7 +496,6 @@ def get_dashboard():
 
     shop = dict(cur.execute("SELECT * FROM shop_status WHERE id = 1").fetchone())
 
-    # Financial Calculations
     todays_sales = cur.execute(
         "SELECT COALESCE(SUM(amount), 0) AS total FROM transactions WHERE tx_type = 'sale' AND tx_date = ?",
         (today,),
@@ -458,7 +529,6 @@ def get_dashboard():
     cash_balance = shop["opening_cash"] + all_cash_in - all_expenses
     net_profit = todays_sales - todays_expenses
 
-    # 7-day chart & Cash-flow prediction calculation
     day_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     chart_data = []
     active_sales_days = []
@@ -481,7 +551,6 @@ def get_dashboard():
             active_expense_days.append(e_val)
         chart_data.append({"day": day_labels[d.weekday()], "sales": s_val, "expenses": e_val})
 
-    # Dynamic Cash-Flow Prediction for next 7 days
     if active_sales_days:
         avg_daily_inflow = sum(active_sales_days) / len(active_sales_days)
         avg_daily_outflow = (sum(active_expense_days) / len(active_expense_days)) if active_expense_days else 0
@@ -541,8 +610,10 @@ def add_product(payload: CreateProductRequest):
 def create_sale(payload: CreateSaleRequest):
     if not payload.items:
         raise HTTPException(status_code=400, detail="Add at least one item")
-    if payload.payment_method == "Credit" and not payload.customer_id:
-        raise HTTPException(status_code=400, detail="Select a customer for Credit (Udhaar) sale")
+
+    typed_name = (payload.customer_name or "").strip()
+    if payload.payment_method == "Credit" and not payload.customer_id and not typed_name:
+        raise HTTPException(status_code=400, detail="Enter or select a customer name for Credit (Udhaar) sale")
 
     conn = get_db()
     cur = conn.cursor()
@@ -571,33 +642,53 @@ def create_sale(payload: CreateSaleRequest):
     tx_date = now.strftime("%Y-%m-%d")
     tx_time = now.strftime("%I:%M %p")
 
+    resolved_customer_id = payload.customer_id
     customer_name = None
-    if payload.customer_id:
-        cust = cur.execute("SELECT name FROM customers WHERE id = ?", (payload.customer_id,)).fetchone()
+
+    if resolved_customer_id:
+        cust = cur.execute("SELECT id, name FROM customers WHERE id = ?", (resolved_customer_id,)).fetchone()
         if cust:
             customer_name = cust["name"]
+        else:
+            resolved_customer_id = None
 
-    if payload.payment_method == "Credit" and payload.customer_id:
+    if not resolved_customer_id and typed_name:
+        existing = cur.execute(
+            "SELECT id, name FROM customers WHERE LOWER(name) = LOWER(?)", (typed_name,)
+        ).fetchone()
+        if existing:
+            resolved_customer_id = existing["id"]
+            customer_name = existing["name"]
+        else:
+            default_due = payload.due_date.strip() if payload.due_date else (now + timedelta(days=7)).strftime("%d %b")
+            cur.execute(
+                "INSERT INTO customers (name, phone, total_credit, paid, due_date) VALUES (?, '', 0, 0, ?)",
+                (typed_name.title(), default_due if payload.payment_method == "Credit" else "-"),
+            )
+            resolved_customer_id = cur.lastrowid
+            customer_name = typed_name.title()
+
+    if payload.payment_method == "Credit" and resolved_customer_id:
         due_str = payload.due_date.strip() if payload.due_date else (now + timedelta(days=7)).strftime("%d %b")
         cur.execute(
             "UPDATE customers SET total_credit = total_credit + ?, due_date = ? WHERE id = ?",
-            (total_amount, due_str, payload.customer_id),
+            (total_amount, due_str, resolved_customer_id),
         )
         title = f"{customer_name} - Credit"
     else:
         summary = ", ".join(item_names[:2]) if item_names else "Counter Sale"
-        title = f"{payload.payment_method} Sale - {summary}"
+        title = f"{customer_name} - {payload.payment_method} Sale ({summary})" if customer_name else f"{payload.payment_method} Sale - {summary}"
 
     cur.execute(
         """INSERT INTO transactions
            (tx_type, title, category, payment_method, amount, customer_id, tx_date, tx_time)
            VALUES ('sale', ?, 'Groceries', ?, ?, ?, ?, ?)""",
-        (title, payload.payment_method, total_amount, payload.customer_id, tx_date, tx_time),
+        (title, payload.payment_method, total_amount, resolved_customer_id, tx_date, tx_time),
     )
 
     conn.commit()
     conn.close()
-    return {"status": "recorded", "total": total_amount, "title": title}
+    return {"status": "recorded", "total": total_amount, "title": title, "customer_name": customer_name}
 
 
 @app.get("/api/customers")
@@ -621,16 +712,29 @@ def add_customer(payload: CreateCustomerRequest):
         raise HTTPException(status_code=400, detail="Customer name is required")
     conn = get_db()
     cur = conn.cursor()
+    existing = cur.execute(
+        "SELECT id, total_credit, paid FROM customers WHERE LOWER(name) = LOWER(?)",
+        (payload.name.strip(),),
+    ).fetchone()
     default_due = payload.due_date.strip() or (datetime.now() + timedelta(days=7)).strftime("%d %b")
-    cur.execute(
-        "INSERT INTO customers (name, phone, total_credit, paid, due_date) VALUES (?, ?, ?, 0, ?)",
-        (
-            payload.name.strip(),
-            payload.phone.strip(),
-            payload.initial_credit,
-            default_due if payload.initial_credit > 0 else "-",
-        ),
-    )
+
+    if existing:
+        new_credit = existing["total_credit"] + max(0.0, payload.initial_credit)
+        new_due = default_due if (new_credit - existing["paid"]) > 0 else "-"
+        cur.execute(
+            "UPDATE customers SET phone = CASE WHEN ? != '' THEN ? ELSE phone END, total_credit = ?, due_date = ? WHERE id = ?",
+            (payload.phone.strip(), payload.phone.strip(), new_credit, new_due, existing["id"]),
+        )
+    else:
+        cur.execute(
+            "INSERT INTO customers (name, phone, total_credit, paid, due_date) VALUES (?, ?, ?, 0, ?)",
+            (
+                payload.name.strip().title(),
+                payload.phone.strip(),
+                payload.initial_credit,
+                default_due if payload.initial_credit > 0 else "-",
+            ),
+        )
     conn.commit()
     conn.close()
     return {"status": "ok"}
@@ -753,6 +857,101 @@ def voice_to_transaction(payload: VoiceTransactionRequest):
     return {"status": "parsed", "parsed": parsed}
 
 
+def build_comprehensive_assistant_reply(msg: str, shop: dict, sales_today: float, exp_today: float, all_sales: float, all_exp: float, cash_balance: float, customers: list, products: list, recent_tx: list) -> str:
+    lower = msg.lower().strip()
+    owner = shop.get("owner_name") or "Shopkeeper"
+    store = shop.get("shop_name") or "your store"
+
+    if any(w in lower for w in ["hello", "hi", "hey", "namaste", "good morning", "good evening"]):
+        return (
+            f"Namaste {owner}! Welcome to {store}'s assistant. "
+            f"Today's sales stand at ₹{sales_today:,.0f}, expenses at ₹{exp_today:,.0f}, and cash in hand is ₹{cash_balance:,.0f}. "
+            f"Ask me anything about sales, profit, Udhaar, inventory, expenses, cash flow, or retail tips!"
+        )
+
+    matched_cust = None
+    for c in customers:
+        if c["name"].lower() in lower:
+            matched_cust = c
+            break
+
+    if matched_cust and any(w in lower for w in ["udhaar", "udhar", "balance", "due", "pending", "credit", "owe", "paid", "khata"]):
+        bal = max(0.0, matched_cust["total_credit"] - matched_cust["paid"])
+        return (
+            f"{matched_cust['name']} has a pending Udhaar balance of ₹{bal:,.0f} "
+            f"(Total Credit: ₹{matched_cust['total_credit']:,.0f}, Paid: ₹{matched_cust['paid']:,.0f}, Due Date: {matched_cust['due_date'] or 'N/A'})."
+        )
+
+    if any(w in lower for w in ["pending", "udhaar", "udhar", "credit", "khata", "due"]):
+        pending_list = [c for c in customers if (c["total_credit"] - c["paid"]) > 0]
+        if not pending_list:
+            return "No pending Udhaar balances right now — all customers are settled!"
+        total_u = sum(c["total_credit"] - c["paid"] for c in pending_list)
+        details = ", ".join([f"{c['name']}: ₹{c['total_credit'] - c['paid']:,.0f} (due {c['due_date'] or 'soon'})" for c in pending_list])
+        return f"Total pending Udhaar across {len(pending_list)} customer(s) is ₹{total_u:,.0f} — {details}."
+
+    if any(w in lower for w in ["profit", "margin", "earning", "kamai"]):
+        today_profit = sales_today - exp_today
+        overall_profit = all_sales - all_exp
+        margin = (today_profit / sales_today * 100) if sales_today > 0 else 0
+        return (
+            f"Today's net profit is ₹{today_profit:,.0f} (Sales ₹{sales_today:,.0f} − Expenses ₹{exp_today:,.0f}, {margin:.1f}% margin). "
+            f"Overall cumulative net (Sales − Expenses) is ₹{overall_profit:,.0f}."
+        )
+
+    if any(w in lower for w in ["cash", "balance", "galla", "drawer", "hand"]):
+        return (
+            f"Estimated cash & liquid balance is ₹{cash_balance:,.0f} "
+            f"(Opening Cash: ₹{shop.get('opening_cash', 0):,.0f} + Cash/UPI/Udhaar inflows − Expenses)."
+        )
+
+    if any(w in lower for w in ["today", "sale", "sales", "bikri", "revenue"]) and "forecast" not in lower:
+        sale_tx = [t for t in recent_tx if t["tx_type"] == "sale" and t["tx_date"] == datetime.now().strftime("%Y-%m-%d")]
+        return (
+            f"Today's recorded sales total ₹{sales_today:,.0f} across {len(sale_tx)} sale entry/entries, "
+            f"while cumulative recorded sales are ₹{all_sales:,.0f}."
+        )
+
+    if any(w in lower for w in ["expense", "expenses", "kharcha", "rent", "electricity", "bill"]):
+        cat_map = {}
+        for t in recent_tx:
+            if t["tx_type"] == "expense":
+                cat_map[t["category"]] = cat_map.get(t["category"], 0) + t["amount"]
+        cats = ", ".join([f"{k}: ₹{v:,.0f}" for k, v in cat_map.items()]) if cat_map else "no recent category breakdown"
+        return f"Today's expenses are ₹{exp_today:,.0f} (Cumulative expenses: ₹{all_exp:,.0f}; recent breakdown: {cats})."
+
+    if any(w in lower for w in ["stock", "inventory", "low", "out of stock", "item", "product", "maalgadi"]):
+        if not products:
+            return "Your inventory list is currently empty. Add items in the Inventory tab to track stock automatically."
+        threshold = int(shop.get("low_stock_threshold") or 5)
+        low_items = [p for p in products if p["stock"] <= threshold]
+        all_items = ", ".join([f"{p['name']} ({p['stock']} {p['unit']} @ ₹{p['price']})" for p in products])
+        if low_items:
+            low_str = ", ".join([f"{p['name']} ({p['stock']} {p['unit']})" for p in low_items])
+            return f"Low stock alert (≤ {threshold}): {low_str}. Full inventory: {all_items}."
+        return f"All items are above your low-stock threshold ({threshold}): {all_items}."
+
+    if any(w in lower for w in ["cash flow", "forecast", "predict", "next 7", "week", "future"]):
+        net = max(0.0, sales_today - exp_today)
+        return (
+            f"At today's net pace of ₹{net:,.0f}/day, a 7-day baseline run-rate is ₹{net * 7:,.0f}. "
+            f"Collecting pending Udhaar can boost short-term liquidity."
+        )
+
+    if any(w in lower for w in ["tip", "advice", "grow", "increase", "suggest", "help", "how to", "customer", "reminder"]):
+        return (
+            f"Practical tips for {store}: (1) Follow up politely on overdue Udhaar every 3–5 days, "
+            f"(2) Reorder fast-moving items before hitting low stock, and (3) Bundle high-margin daily essentials near checkout. "
+            f"You can also ask me for exact numbers on today's sales, profit, Udhaar, expenses, or stock!"
+        )
+
+    return (
+        f"Here is a quick snapshot for {store}: Today's Sales = ₹{sales_today:,.0f}, Today's Expenses = ₹{exp_today:,.0f}, "
+        f"Cash Balance = ₹{cash_balance:,.0f}, and {len(customers)} customer(s) in Udhaar book. "
+        f"Ask me any specific question about your shop, customers, stock, finances, or business growth, or say/type a transaction like 'Sold 2 kg Rice for 120 Cash'."
+    )
+
+
 @app.post("/api/assistant")
 def ask_assistant(payload: ChatRequest):
     msg = payload.message.strip()
@@ -772,14 +971,26 @@ def ask_assistant(payload: ChatRequest):
         "SELECT COALESCE(SUM(amount), 0) AS e FROM transactions WHERE tx_type = 'expense' AND tx_date = ?",
         (today,),
     ).fetchone()["e"]
+    all_sales = cur.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS s FROM transactions WHERE tx_type = 'sale'"
+    ).fetchone()["s"]
+    all_exp = cur.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS e FROM transactions WHERE tx_type = 'expense'"
+    ).fetchone()["e"]
+    all_cash_in = cur.execute(
+        """SELECT COALESCE(SUM(amount), 0) AS total FROM transactions
+           WHERE (tx_type = 'sale' AND payment_method IN ('Cash', 'UPI')) OR tx_type = 'credit_payment'"""
+    ).fetchone()["total"]
+    cash_balance = shop["opening_cash"] + all_cash_in - all_exp
     customers = [dict(r) for r in cur.execute("SELECT * FROM customers").fetchall()]
     products = [dict(r) for r in cur.execute("SELECT * FROM products").fetchall()]
-    recent_tx = [dict(r) for r in cur.execute("SELECT * FROM transactions ORDER BY id DESC LIMIT 10").fetchall()]
+    recent_tx = [dict(r) for r in cur.execute("SELECT * FROM transactions ORDER BY id DESC LIMIT 15").fetchall()]
     conn.close()
 
-    # Check if user is asking the AI to record a transaction directly in chat
     lower_msg = msg.lower()
-    if any(k in lower_msg for k in ["record ", "add sale", "sold ", "add expense", "spent ", "udhaar", "credit sale"]):
+    if any(k in lower_msg for k in ["record ", "add sale", "sold ", "add expense", "spent ", "credit sale"]) or (
+        ("udhaar" in lower_msg or "udhar" in lower_msg) and re.search(r"\d+", lower_msg) and any(v in lower_msg for v in ["add", "give", "gave", "record", "paid", "received"])
+    ):
         try:
             parsed = parse_voice_with_fallback(msg, products, customers)
             if parsed.get("amount", 0) > 0:
@@ -791,9 +1002,7 @@ def ask_assistant(payload: ChatRequest):
         except HTTPException as he:
             return {"reply": f"⚠️ {he.detail}", "action_taken": False}
 
-        # Try Gemini API for intelligent financial Q&A
     client = get_gemini_client()
-
     if client:
         context = {
             "shop_name": shop["shop_name"],
@@ -801,55 +1010,32 @@ def ask_assistant(payload: ChatRequest):
             "todays_sales": sales_today,
             "todays_expenses": exp_today,
             "todays_net_profit": sales_today - exp_today,
+            "all_sales": all_sales,
+            "all_expenses": all_exp,
+            "cash_balance": cash_balance,
             "customers": customers,
             "products": products,
             "recent_transactions": recent_tx,
         }
-
         try:
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
-                contents=f"""You are DukaanAI, a helpful financial assistant for {shop['owner_name']}'s store '{shop['shop_name']}'.
+                contents=f"""You are DukaanAI, a helpful financial and business assistant for {shop['owner_name']}'s store '{shop['shop_name']}'.
 
-Use Indian Rupees (₹).
-Answer concisely based on this live shop data:
-
+Answer any question asked by the shop owner accurately and helpfully using Indian Rupees (₹).
+When answering shop-specific questions, use this live shop data:
 {json.dumps(context)}
 
-Shopkeeper question: {msg}"""
+Shopkeeper question: {msg}""",
             )
-
             return {
                 "reply": response.text.strip(),
-                "action_taken": False
+                "action_taken": False,
             }
-
         except Exception as e:
             print("Gemini API Error:", e)
-            pass
-    
 
-    # Deterministic live-DB fallback answers
-    if "profit" in lower_msg:
-        reply = f"Today's estimated net profit is ₹{sales_today - exp_today:,.0f} (Sales: ₹{sales_today:,.0f} − Expenses: ₹{exp_today:,.0f})."
-    elif "pending" in lower_msg or "udhaar" in lower_msg or "credit" in lower_msg:
-        pending_list = [c for c in customers if (c["total_credit"] - c["paid"]) > 0]
-        if not pending_list:
-            reply = "No pending Udhaar balances right now."
-        else:
-            total_u = sum(c["total_credit"] - c["paid"] for c in pending_list)
-            details = ", ".join([f"{c['name']}: ₹{c['total_credit'] - c['paid']:,.0f}" for c in pending_list])
-            reply = f"Total pending Udhaar is ₹{total_u:,.0f} ({details})."
-    elif "cash flow" in lower_msg or "forecast" in lower_msg or "predict" in lower_msg:
-        net = max(0, sales_today - exp_today)
-        reply = f"At your current daily net pace of ₹{net:,.0f}/day, next 7 days projected cash flow is ₹{net * 7:,.0f}."
-    elif "stock" in lower_msg or "inventory" in lower_msg:
-        if not products:
-            reply = "Your inventory list is currently empty. Add products in the Inventory tab."
-        else:
-            items = ", ".join([f"{p['name']} ({p['stock']} {p['unit']})" for p in products])
-            reply = f"Current inventory: {items}."
-    else:
-        reply = f"Hi {shop['owner_name']}! Ask me about today's profit, pending Udhaar, cash-flow forecast, or speak/type a sale like 'Sold 2 kg Rice for 120 Cash'."
-
+    reply = build_comprehensive_assistant_reply(
+        msg, shop, sales_today, exp_today, all_sales, all_exp, cash_balance, customers, products, recent_tx
+    )
     return {"reply": reply, "action_taken": False}

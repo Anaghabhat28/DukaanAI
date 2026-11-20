@@ -1,182 +1,309 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   LayoutDashboard,
-  ArrowLeftRight,
-  ShoppingCart,
+  ReceiptText,
+  ShoppingBag,
   BookOpen,
-  Receipt,
-  Package,
+  Wallet,
+  Boxes,
   BarChart3,
   Bot,
   Settings,
-  LogOut,
-  Store,
+  UserCircle2,
+  Mic,
   Bell,
   Calendar,
   TrendingUp,
-  Wallet,
   IndianRupee,
-  Landmark,
-  CheckCircle2,
-  Plus,
-  Send,
-  Mic,
-  MicOff,
-  Download,
-  Search,
-  User,
+  Clock,
   Sparkles,
-  RotateCcw,
+  Store,
+  User,
+  Plus,
+  CheckCircle2,
+  Send,
+  Phone,
+  FileText,
+  MapPin,
 } from "lucide-react";
+import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  CartesianGrid,
+  Legend,
+} from "recharts";
 import { api } from "./api";
 
 const NAV_ITEMS = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { id: "transactions", label: "Transactions", icon: ArrowLeftRight },
-  { id: "sales", label: "Sales", icon: ShoppingCart },
+  { id: "transactions", label: "Transactions", icon: ReceiptText },
+  { id: "sales", label: "Sales", icon: ShoppingBag },
   { id: "udhaar", label: "Udhaar Book", icon: BookOpen },
-  { id: "expenses", label: "Expenses", icon: Receipt },
-  { id: "inventory", label: "Inventory", icon: Package },
+  { id: "expenses", label: "Expenses", icon: Wallet },
+  { id: "inventory", label: "Inventory", icon: Boxes },
   { id: "reports", label: "Reports", icon: BarChart3 },
   { id: "assistant", label: "DukaanAI Bot", icon: Bot },
+  { id: "profile", label: "Profile", icon: UserCircle2 },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
+const QUICK_PROMPTS = [
+  "What is today's net profit and cash balance?",
+  "Who has pending Udhaar and how much?",
+  "Which items are low on stock right now?",
+  "Give me practical tips to boost daily sales",
+];
+
+function formatINR(val) {
+  const num = Number(val || 0);
+  return `₹${num.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
+}
+
 export default function App() {
-  const [shopInfo, setShopInfo] = useState(null);
-  const [loadingInit, setLoadingInit] = useState(true);
-
-  // Store Setup Form (100% User-Entered)
-  const [setupShopName, setSetupShopName] = useState("");
-  const [setupOwnerName, setSetupOwnerName] = useState("");
-  const [setupOpeningCash, setSetupOpeningCash] = useState("");
-
+  const [loading, setLoading] = useState(true);
+  const [shop, setShop] = useState(null);
   const [activeTab, setActiveTab] = useState("dashboard");
+
+  // Onboarding form state
+  const [setupForm, setSetupForm] = useState({
+    shop_name: "",
+    owner_name: "",
+    opening_cash: "",
+    phone: "",
+    gstin: "",
+    address: "",
+    low_stock_threshold: "5",
+  });
+  const [setupError, setSetupError] = useState("");
+
+  // Profile form state
+  const [profileForm, setProfileForm] = useState({
+    shop_name: "",
+    owner_name: "",
+    phone: "",
+    gstin: "",
+    address: "",
+    opening_cash: "0",
+    low_stock_threshold: "5",
+  });
+  const [profileSavedMsg, setProfileSavedMsg] = useState("");
+
+  // Dashboard & Data states
   const [dashboard, setDashboard] = useState(null);
   const [products, setProducts] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [transactions, setTransactions] = useState([]);
   const [reports, setReports] = useState({ expense_breakdown: [] });
 
-  // Add Sale state
-  const [saleMode, setSaleMode] = useState("custom");
+  // Sales form state (supports both selecting existing customer and typing any customer name)
+  const [paymentMethod, setPaymentMethod] = useState("Cash");
   const [selectedProductId, setSelectedProductId] = useState("");
   const [customItemName, setCustomItemName] = useState("");
-  const [customItemPrice, setCustomItemPrice] = useState("");
   const [quantity, setQuantity] = useState(1);
-  const [paymentMethod, setPaymentMethod] = useState("Cash");
+  const [unitPrice, setUnitPrice] = useState("");
+  const [customerInputName, setCustomerInputName] = useState("");
   const [selectedCustomerId, setSelectedCustomerId] = useState("");
-  const [saleSuccess, setSaleSuccess] = useState("");
+  const [dueDate, setDueDate] = useState("");
+  const [lastReceipt, setLastReceipt] = useState(null);
 
-  // Udhaar state
-  const [customerSearch, setCustomerSearch] = useState("");
-  const [showAddCustomer, setShowAddCustomer] = useState(false);
+  // Udhaar Book state
   const [newCustName, setNewCustName] = useState("");
   const [newCustPhone, setNewCustPhone] = useState("");
   const [newCustCredit, setNewCustCredit] = useState("");
-  const [reminderToast, setReminderToast] = useState("");
+  const [newCustDue, setNewCustDue] = useState("");
+  const [payAmounts, setPayAmounts] = useState({});
 
-  // Expense state
+  // Expenses form state
   const [expTitle, setExpTitle] = useState("");
   const [expCategory, setExpCategory] = useState("Electricity");
   const [expAmount, setExpAmount] = useState("");
+  const [expMethod, setExpMethod] = useState("Cash");
 
-  // Inventory state
+  // Inventory form state
   const [prodName, setProdName] = useState("");
   const [prodUnit, setProdUnit] = useState("kg");
   const [prodPrice, setProdPrice] = useState("");
   const [prodStock, setProdStock] = useState("");
 
-  // Voice-to-Transaction Modal & Web Speech API
-  const [voiceModalOpen, setVoiceModalOpen] = useState(false);
+  // Assistant state
+  const [chatInput, setChatInput] = useState("");
+  const [chatSending, setChatSending] = useState(false);
+  const [messages, setMessages] = useState([
+    {
+      role: "assistant",
+      text: "Namaste! I'm DukaanAI. Ask me any question about your shop, sales, profit, Udhaar, stock, or business growth — or speak/type a transaction to record it instantly.",
+    },
+  ]);
+
+  // Notifications state
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [readNotifIds, setReadNotifIds] = useState([]);
+
+  // Voice recognition state (auto-sends when speech stops)
   const [isListening, setIsListening] = useState(false);
+  const [voiceModalOpen, setVoiceModalOpen] = useState(false);
   const [voiceTranscript, setVoiceTranscript] = useState("");
   const [voiceStatus, setVoiceStatus] = useState("");
   const recognitionRef = useRef(null);
+  const finalTranscriptRef = useRef("");
 
-  // Assistant state
-  const [chatInput, setChatInput] = useState("");
-  const [messages, setMessages] = useState([]);
+  const [toast, setToast] = useState("");
 
-  const loadAll = async () => {
+  function showToast(msg) {
+    setToast(msg);
+    setTimeout(() => {
+      setToast((prev) => (prev === msg ? "" : prev));
+    }, 3400);
+  }
+
+  function syncProfileFromShop(shopData) {
+    if (!shopData) return;
+    setProfileForm({
+      shop_name: shopData.shop_name || "",
+      owner_name: shopData.owner_name || "",
+      phone: shopData.phone || "",
+      gstin: shopData.gstin || "",
+      address: shopData.address || "",
+      opening_cash: String(shopData.opening_cash ?? 0),
+      low_stock_threshold: String(shopData.low_stock_threshold ?? 5),
+    });
+  }
+
+  async function refreshAllData() {
     try {
-      const [d, p, c, t, r] = await Promise.all([
+      const shopData = await api.getShop();
+      setShop(shopData);
+      syncProfileFromShop(shopData);
+
+      if (!shopData.is_configured) {
+        setLoading(false);
+        return;
+      }
+
+      const [dashData, prodData, custData, txData, repData] = await Promise.all([
         api.getDashboard(),
         api.getProducts(),
         api.getCustomers(),
         api.getTransactions(),
         api.getReports(),
       ]);
-      setDashboard(d);
-      setProducts(p);
-      if (p.length > 0) {
-        setSelectedProductId((prev) => prev || String(p[0].id));
-      } else {
-        setSaleMode("custom");
-      }
-      setCustomers(c);
-      setTransactions(t);
-      setReports(r);
+
+      setDashboard(dashData);
+      setProducts(prodData);
+      setCustomers(custData);
+      setTransactions(txData);
+      setReports(repData);
     } catch (err) {
       console.error(err);
+    } finally {
+      setLoading(false);
     }
-  };
+  }
 
   useEffect(() => {
-    api
-      .getShop()
-      .then((s) => {
-        setShopInfo(s);
-        if (s.is_configured) {
-          setMessages([
-            {
-              sender: "bot",
-              text: `Namaste ${s.owner_name}! I'm DukaanAI. Speak or type any sale, expense, Udhaar entry, or ask about your store's profit & cash flow.`,
-            },
-          ]);
-          loadAll();
-        }
-      })
-      .finally(() => setLoadingInit(false));
+    refreshAllData();
   }, []);
 
-  const handleCompleteSetup = async (e) => {
-    e.preventDefault();
-    const res = await api.setupShop({
-      shop_name: setupShopName,
-      owner_name: setupOwnerName,
-      opening_cash: Number(setupOpeningCash || 0),
+  // Build live notifications from shop alerts & recent transactions
+  const threshold = Number(shop?.low_stock_threshold || 5);
+  const notifications = React.useMemo(() => {
+    const list = [];
+    customers
+      .filter((c) => Number(c.balance || 0) > 0)
+      .forEach((c) => {
+        list.push({
+          id: `udhaar-${c.id}`,
+          title: `Pending Udhaar: ${c.name}`,
+          detail: `${formatINR(c.balance)} due (${c.due_date || "Upcoming"})`,
+          badge: "Udhaar",
+        });
+      });
+
+    products
+      .filter((p) => Number(p.stock || 0) <= threshold)
+      .forEach((p) => {
+        list.push({
+          id: `stock-${p.id}`,
+          title: `Low Stock: ${p.name}`,
+          detail: `Only ${p.stock} ${p.unit} left in inventory`,
+          badge: "Stock",
+        });
+      });
+
+    transactions.slice(0, 5).forEach((t) => {
+      list.push({
+        id: `tx-${t.id}`,
+        title: t.title,
+        detail: `${formatINR(t.amount)} via ${t.payment_method} • ${t.tx_time}`,
+        badge: t.tx_type === "expense" ? "Expense" : "Entry",
+      });
     });
-    setShopInfo(res);
-    setMessages([
-      {
-        sender: "bot",
-        text: `Namaste ${res.owner_name}! Welcome to ${res.shop_name}. Speak or type any sale, expense, or Udhaar entry to get started.`,
-      },
-    ]);
-    await loadAll();
-  };
 
-  const handleToggleShop = async () => {
-    await api.toggleShop();
-    loadAll();
-  };
+    return list;
+  }, [customers, products, transactions, threshold]);
 
-  const handleResetStore = async () => {
-    if (!window.confirm("Clear all transactions, customers, inventory, and store setup to start fresh?")) return;
-    await api.resetShop();
-    setShopInfo({ is_configured: 0 });
-    setDashboard(null);
-    setSetupShopName("");
-    setSetupOwnerName("");
-    setSetupOpeningCash("");
-  };
+  const unreadCount = notifications.filter((n) => !readNotifIds.includes(n.id)).length;
 
-  // --- Voice Recognition (Browser SpeechRecognition + Backend Gemini Parser) ---
-  const startSpeechRecognition = (target = "modal") => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  function handleMarkAllRead() {
+    setReadNotifIds(notifications.map((n) => n.id));
+  }
+
+  async function submitVoiceText(textToSend, target = "transaction") {
+    const cleaned = (textToSend || "").trim();
+    if (!cleaned) return;
+
+    if (target === "assistant") {
+      setChatInput("");
+      setMessages((prev) => [...prev, { role: "user", text: cleaned }]);
+      setChatSending(true);
+      try {
+        const res = await api.askAssistant(cleaned);
+        setMessages((prev) => [...prev, { role: "assistant", text: res.reply }]);
+        if (res.action_taken) {
+          await refreshAllData();
+        }
+      } catch (err) {
+        setMessages((prev) => [...prev, { role: "assistant", text: `⚠️ ${err.message}` }]);
+      } finally {
+        setChatSending(false);
+      }
+      return;
+    }
+
+    setVoiceStatus("Auto-sending spoken transaction...");
+    try {
+      const res = await api.voiceTransaction(cleaned, true);
+      const p = res.parsed || {};
+      const summary = `Recorded ${String(p.tx_type || "sale").replace("_", " ")}: ${p.title || cleaned} for ${formatINR(p.amount)} (${p.payment_method || "Cash"})`;
+      setVoiceStatus(`✅ ${summary}`);
+      showToast(`🎤 ${summary}`);
+      await refreshAllData();
+      setTimeout(() => {
+        setVoiceModalOpen(false);
+        setVoiceStatus("");
+        setVoiceTranscript("");
+      }, 1100);
+    } catch (err) {
+      setVoiceStatus(`⚠️ ${err.message}`);
+    }
+  }
+
+  function startSpeechRecognition(target = "transaction") {
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+
     if (!SpeechRecognition) {
-      alert("Your browser does not support Speech Recognition. Please type your command in the box instead.");
+      setVoiceModalOpen(true);
+      setVoiceStatus("SpeechRecognition not supported in this browser. Type your entry below.");
+      return;
+    }
+
+    if (recognitionRef.current && isListening) {
+      recognitionRef.current.stop();
       return;
     }
 
@@ -184,231 +311,416 @@ export default function App() {
     recognition.lang = "en-IN";
     recognition.interimResults = true;
     recognition.continuous = false;
+    finalTranscriptRef.current = "";
 
-    recognition.onstart = () => {
-      setIsListening(true);
-      setVoiceStatus("Listening... Speak your transaction clearly (e.g. 'Sold 2 kg Rice for 120 UPI')");
-    };
+    setIsListening(true);
+    if (target === "transaction") {
+      setVoiceModalOpen(true);
+      setVoiceTranscript("");
+      setVoiceStatus("Listening... speak naturally, it will auto-send when you stop.");
+    } else {
+      setVoiceStatus("Listening to your question... will send automatically.");
+    }
 
     recognition.onresult = (event) => {
-      let text = "";
-      for (let i = 0; i < event.results.length; i++) {
-        text += event.results[i][0].transcript;
+      let interim = "";
+      let finalText = finalTranscriptRef.current;
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const chunk = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          finalText += `${chunk} `;
+        } else {
+          interim += chunk;
+        }
       }
-      if (target === "modal") {
-        setVoiceTranscript(text);
+      finalTranscriptRef.current = finalText.trim();
+      const display = (finalTranscriptRef.current || interim).trim();
+      if (target === "transaction") {
+        setVoiceTranscript(display);
       } else {
-        setChatInput(text);
+        setChatInput(display);
       }
     };
 
-    recognition.onerror = (e) => {
+    recognition.onerror = (event) => {
       setIsListening(false);
-      setVoiceStatus(`Mic error: ${e.error}. You can also type below.`);
+      setVoiceStatus(`Mic error: ${event.error}. You can type below.`);
     };
 
     recognition.onend = () => {
       setIsListening(false);
+      const spoken = (finalTranscriptRef.current || "").trim();
+      if (spoken) {
+        submitVoiceText(spoken, target);
+      } else if (target === "transaction") {
+        setVoiceStatus("No speech detected. Speak again or type below.");
+      }
     };
 
     recognitionRef.current = recognition;
     recognition.start();
-  };
+  }
 
-  const stopSpeechRecognition = () => {
-    if (recognitionRef.current) {
-      recognitionRef.current.stop();
+  async function handleSetupSubmit(e) {
+    e.preventDefault();
+    setSetupError("");
+    if (!setupForm.shop_name.trim() || !setupForm.owner_name.trim()) {
+      setSetupError("Please enter both Shop Name and Owner Name.");
+      return;
     }
-    setIsListening(false);
-  };
-
-  const handleProcessVoiceTransaction = async () => {
-    if (!voiceTranscript.trim()) return;
     try {
-      setVoiceStatus("Converting with DukaanAI...");
-      const res = await api.voiceTransaction(voiceTranscript, true);
-      setVoiceStatus(
-        `✓ Saved ${res.parsed.tx_type.replace("_", " ")}: ${res.parsed.title} — ₹${res.parsed.amount} (${res.parsed.payment_method})`
-      );
-      setVoiceTranscript("");
-      await loadAll();
+      await api.setupShop({
+        shop_name: setupForm.shop_name.trim(),
+        owner_name: setupForm.owner_name.trim(),
+        opening_cash: Number(setupForm.opening_cash || 0),
+        phone: setupForm.phone.trim(),
+        gstin: setupForm.gstin.trim(),
+        address: setupForm.address.trim(),
+        low_stock_threshold: Number(setupForm.low_stock_threshold || 5),
+      });
+      showToast("Store setup complete! Welcome to DukaanAI.");
+      await refreshAllData();
     } catch (err) {
-      setVoiceStatus(`⚠️ ${err.message}`);
+      setSetupError(err.message);
     }
-  };
+  }
 
-  // --- Manual Sale Entry ---
-  const selectedProduct = products.find((p) => String(p.id) === String(selectedProductId));
-  const activeUnitPrice =
-    saleMode === "custom" ? Number(customItemPrice || 0) : selectedProduct?.price || 0;
-  const activeItemLabel =
-    saleMode === "custom" ? customItemName || "Item" : selectedProduct?.name || "Item";
-  const activeTotal = activeUnitPrice * quantity;
-
-  const handleSaveSale = async () => {
+  async function handleProfileSave(e) {
+    e.preventDefault();
+    setProfileSavedMsg("");
     try {
-      const payload = {
+      await api.updateProfile({
+        shop_name: profileForm.shop_name.trim(),
+        owner_name: profileForm.owner_name.trim(),
+        phone: profileForm.phone.trim(),
+        gstin: profileForm.gstin.trim(),
+        address: profileForm.address.trim(),
+        opening_cash: Number(profileForm.opening_cash || 0),
+        low_stock_threshold: Number(profileForm.low_stock_threshold || 5),
+      });
+      setProfileSavedMsg("Profile details updated!");
+      showToast("Shop & owner profile saved!");
+      await refreshAllData();
+    } catch (err) {
+      setProfileSavedMsg(`⚠️ ${err.message}`);
+    }
+  }
+
+  async function handleToggleShop() {
+    try {
+      const res = await api.toggleShop();
+      showToast(res.is_open ? "Shop status set to OPEN" : "Shop status set to CLOSED");
+      await refreshAllData();
+    } catch (err) {
+      showToast(err.message);
+    }
+  }
+
+  function handleProductSelect(prodId) {
+    setSelectedProductId(prodId);
+    const found = products.find((p) => String(p.id) === String(prodId));
+    if (found) {
+      setUnitPrice(String(found.price));
+      setCustomItemName("");
+    }
+  }
+
+  function handleCustomerNameInput(val) {
+    setCustomerInputName(val);
+    const exactMatch = customers.find(
+      (c) => c.name.trim().toLowerCase() === val.trim().toLowerCase()
+    );
+    setSelectedCustomerId(exactMatch ? String(exactMatch.id) : "");
+  }
+
+  async function handleRecordSale(e) {
+    e.preventDefault();
+    const qty = Number(quantity || 1);
+    const price = Number(unitPrice || 0);
+    if (price <= 0 || qty <= 0) {
+      showToast("Enter valid quantity and unit price");
+      return;
+    }
+
+    const typedCust = customerInputName.trim();
+    if (paymentMethod === "Credit" && !selectedCustomerId && !typedCust) {
+      showToast("Enter or select customer name for Credit (Udhaar) sale");
+      return;
+    }
+
+    const selectedProd = products.find((p) => String(p.id) === String(selectedProductId));
+    const itemLabel = selectedProd
+      ? `${selectedProd.name} x${qty}`
+      : `${(customItemName || "Item").trim()} x${qty}`;
+
+    try {
+      const res = await api.createSale({
         items: [
-          saleMode === "custom"
-            ? {
-                custom_name: customItemName,
-                quantity,
-                unit_price: Number(customItemPrice),
-              }
-            : {
-                product_id: Number(selectedProductId),
-                quantity,
-                unit_price: selectedProduct?.price || 0,
-              },
+          {
+            product_id: selectedProd ? selectedProd.id : null,
+            custom_name: selectedProd ? null : (customItemName || "Counter Item").trim(),
+            quantity: qty,
+            unit_price: price,
+          },
         ],
         payment_method: paymentMethod,
         customer_id: selectedCustomerId ? Number(selectedCustomerId) : null,
-      };
-      await api.createSale(payload);
-      setSaleSuccess("Sale Recorded Successfully!");
-      setQuantity(1);
+        customer_name: typedCust,
+        due_date: dueDate,
+      });
+
+      const resolvedCust =
+        res.customer_name ||
+        typedCust ||
+        customers.find((c) => String(c.id) === String(selectedCustomerId))?.name ||
+        "Walk-in";
+
+      setLastReceipt({
+        title: res.title,
+        itemLabel,
+        paymentMethod,
+        customerName: resolvedCust,
+        total: res.total,
+        time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      });
+
       setCustomItemName("");
-      setCustomItemPrice("");
-      await loadAll();
-      setTimeout(() => setSaleSuccess(""), 3000);
+      setSelectedProductId("");
+      setQuantity(1);
+      setUnitPrice("");
+      setCustomerInputName("");
+      setSelectedCustomerId("");
+      setDueDate("");
+      showToast(`Sale recorded: ${formatINR(res.total)}`);
+      await refreshAllData();
     } catch (err) {
-      alert(err.message);
+      showToast(err.message);
     }
-  };
+  }
 
-  const handleAddCustomer = async (e) => {
+  async function handleAddCustomer(e) {
     e.preventDefault();
-    await api.addCustomer({
-      name: newCustName,
-      phone: newCustPhone,
-      initial_credit: Number(newCustCredit || 0),
-    });
-    setNewCustName("");
-    setNewCustPhone("");
-    setNewCustCredit("");
-    setShowAddCustomer(false);
-    loadAll();
-  };
+    if (!newCustName.trim()) return;
+    try {
+      await api.addCustomer({
+        name: newCustName.trim(),
+        phone: newCustPhone.trim(),
+        initial_credit: Number(newCustCredit || 0),
+        due_date: newCustDue.trim(),
+      });
+      setNewCustName("");
+      setNewCustPhone("");
+      setNewCustCredit("");
+      setNewCustDue("");
+      showToast("Customer added to Udhaar Book");
+      await refreshAllData();
+    } catch (err) {
+      showToast(err.message);
+    }
+  }
 
-  const handleSettleCustomer = async (cust) => {
-    const amtStr = prompt(
-      `Enter payment received from ${cust.name} (Pending: ₹${cust.balance}):`,
-      String(cust.balance)
+  async function handleCustomerPayment(custId) {
+    const amt = Number(payAmounts[custId] || 0);
+    if (amt <= 0) {
+      showToast("Enter payment amount");
+      return;
+    }
+    try {
+      const res = await api.payCustomer(custId, amt, "Cash");
+      setPayAmounts((prev) => ({ ...prev, [custId]: "" }));
+      showToast(`Received ${formatINR(res.paid_amount)} Udhaar payment`);
+      await refreshAllData();
+    } catch (err) {
+      showToast(err.message);
+    }
+  }
+
+  async function handleAddExpense(e) {
+    e.preventDefault();
+    if (!expTitle.trim() || Number(expAmount || 0) <= 0) return;
+    try {
+      await api.addExpense({
+        title: expTitle.trim(),
+        category: expCategory,
+        amount: Number(expAmount),
+        payment_method: expMethod,
+      });
+      setExpTitle("");
+      setExpAmount("");
+      showToast("Expense recorded");
+      await refreshAllData();
+    } catch (err) {
+      showToast(err.message);
+    }
+  }
+
+  async function handleAddProduct(e) {
+    e.preventDefault();
+    if (!prodName.trim() || Number(prodPrice || 0) <= 0) return;
+    try {
+      await api.addProduct({
+        name: prodName.trim(),
+        unit: prodUnit.trim() || "unit",
+        price: Number(prodPrice),
+        stock: Number(prodStock || 0),
+      });
+      setProdName("");
+      setProdPrice("");
+      setProdStock("");
+      showToast("Product added to inventory");
+      await refreshAllData();
+    } catch (err) {
+      showToast(err.message);
+    }
+  }
+
+  async function handleSendChat(textOverride) {
+    const promptText = (typeof textOverride === "string" ? textOverride : chatInput).trim();
+    if (!promptText || chatSending) return;
+    await submitVoiceText(promptText, "assistant");
+  }
+
+  async function handleResetStore() {
+    try {
+      await api.resetShop();
+      setLastReceipt(null);
+      setActiveTab("dashboard");
+      showToast("All store data reset");
+      await refreshAllData();
+    } catch (err) {
+      showToast(err.message);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>
+        Loading DukaanAI...
+      </div>
     );
-    if (!amtStr) return;
-    await api.payCustomer(cust.id, Number(amtStr));
-    loadAll();
-  };
+  }
 
-  const handleAddExpense = async (e) => {
-    e.preventDefault();
-    if (!expTitle || !expAmount) return;
-    await api.addExpense({
-      title: expTitle,
-      category: expCategory,
-      amount: Number(expAmount),
-    });
-    setExpTitle("");
-    setExpAmount("");
-    loadAll();
-  };
-
-  const handleAddProduct = async (e) => {
-    e.preventDefault();
-    if (!prodName || !prodPrice) return;
-    await api.addProduct({
-      name: prodName,
-      unit: prodUnit,
-      price: Number(prodPrice),
-      stock: Number(prodStock || 0),
-    });
-    setProdName("");
-    setProdPrice("");
-    setProdStock("");
-    loadAll();
-  };
-
-  const sendChat = async (promptText) => {
-    const text = promptText || chatInput;
-    if (!text.trim()) return;
-    setMessages((prev) => [...prev, { sender: "user", text }]);
-    setChatInput("");
-    const res = await api.askAssistant(text);
-    setMessages((prev) => [...prev, { sender: "bot", text: res.reply }]);
-    if (res.action_taken) {
-      await loadAll();
-    }
-  };
-
-  if (loadingInit) return <div style={{ padding: 40 }}>Loading DukaanAI...</div>;
-
-  // --- USER-ENTERED STORE ONBOARDING ---
-  if (!shopInfo || !shopInfo.is_configured) {
+  if (!shop || !shop.is_configured) {
     return (
       <div className="login-wrapper">
         <div className="login-hero">
+          <div className="hero-badge-pill">
+            <Sparkles size={14} /> Smart Indian Shop Accounting & Voice AI
+          </div>
           <div className="hero-brand">
-            <Store size={44} color="#5b32d6" />
-            <span>DukaanAI</span>
+            <Store size={42} /> DukaanAI
           </div>
-          <div className="hero-tagline">Your Dukaan. Your Voice. Your Control.</div>
-          <div className="hero-sub">
-            Smart Accounting, Voice-to-Transaction Entry & Cash-Flow Intelligence for Shopkeepers
-          </div>
+          <div className="hero-tagline">Apni Dukaan, Ab Smart & Voice-First</div>
+          <p className="hero-sub">
+            Track daily sales, customer Udhaar khata, shop expenses, stock alerts, and instant AI business answers in one clean workspace.
+          </p>
           <div className="hero-illustration">
-            <Mic size={54} color="#5b32d6" />
-            <div style={{ fontWeight: 800, color: "#25195e", fontSize: 16 }}>
-              Speak or Type Entries
+            <div className="hero-mini-row">
+              <span>🎤 Auto-Send Voice Khata</span>
+              <strong>Instant Entry</strong>
             </div>
-            <div style={{ fontSize: 12, color: "#6e678c" }}>
-              Zero pre-filled clutter — built from your live store numbers
+            <div className="hero-mini-row">
+              <span>📒 Udhaar & Customer Ledger</span>
+              <strong>Live Balances</strong>
+            </div>
+            <div className="hero-mini-row">
+              <span>🤖 DukaanAI Shop Copilot</span>
+              <strong>Any Question</strong>
             </div>
           </div>
         </div>
 
         <div className="login-form-side">
-          <form className="login-card" onSubmit={handleCompleteSetup}>
-            <h1>Set Up Your Dukaan</h1>
-            <p className="subtitle">Enter your store details to start fresh</p>
+          <form className="login-card" onSubmit={handleSetupSubmit}>
+            <h1>Set Up Your Shop</h1>
+            <p className="subtitle">Launch your store ledger in seconds</p>
 
-            <label className="field-label">Shop / Dukaan Name *</label>
+            <div className="sample-presets">
+              <button
+                type="button"
+                className="preset-chip"
+                onClick={() =>
+                  setSetupForm((p) => ({
+                    ...p,
+                    shop_name: "Sharma Kirana & General Store",
+                    owner_name: "Ramesh Sharma",
+                    opening_cash: "5000",
+                    phone: "9876543210",
+                  }))
+                }
+              >
+                ✨ Fill Kirana Sample
+              </button>
+              <button
+                type="button"
+                className="preset-chip"
+                onClick={() =>
+                  setSetupForm((p) => ({
+                    ...p,
+                    shop_name: "Verma Traders",
+                    owner_name: "Amit Verma",
+                    opening_cash: "10000",
+                    phone: "9811122233",
+                  }))
+                }
+              >
+                ✨ Fill Traders Sample
+              </button>
+            </div>
+
+            {setupError && (
+              <div style={{ background: "#fef2f2", color: "#b91c1c", padding: "10px 12px", borderRadius: 10, fontSize: 13, marginBottom: 14, fontWeight: 600 }}>
+                {setupError}
+              </div>
+            )}
+
+            <label className="field-label">Shop Name *</label>
             <div className="input-group">
-              <Store size={18} color="#6e678c" />
+              <Store size={18} color="#5b32d6" />
               <input
                 type="text"
-                placeholder="e.g. Sri Ganesh General Stores"
-                value={setupShopName}
-                onChange={(e) => setSetupShopName(e.target.value)}
-                required
+                placeholder="e.g., Sharma Kirana Store"
+                value={setupForm.shop_name}
+                onChange={(e) => setSetupForm({ ...setupForm, shop_name: e.target.value })}
               />
             </div>
 
-            <label className="field-label">Shopkeeper / Owner Name *</label>
+            <label className="field-label">Owner Name *</label>
             <div className="input-group">
-              <User size={18} color="#6e678c" />
+              <User size={18} color="#5b32d6" />
               <input
                 type="text"
-                placeholder="e.g. Rajeshwari"
-                value={setupOwnerName}
-                onChange={(e) => setSetupOwnerName(e.target.value)}
-                required
+                placeholder="e.g., Ramesh Sharma"
+                value={setupForm.owner_name}
+                onChange={(e) => setSetupForm({ ...setupForm, owner_name: e.target.value })}
               />
             </div>
 
-            <label className="field-label">Opening Cash in Drawer (₹)</label>
+            <label className="field-label">Opening Cash Balance (₹)</label>
             <div className="input-group">
-              <IndianRupee size={18} color="#6e678c" />
+              <IndianRupee size={18} color="#5b32d6" />
               <input
                 type="number"
-                min="0"
+                step="any"
                 placeholder="0"
-                value={setupOpeningCash}
-                onChange={(e) => setSetupOpeningCash(e.target.value)}
+                value={setupForm.opening_cash}
+                onChange={(e) => setSetupForm({ ...setupForm, opening_cash: e.target.value })}
+              />
+            </div>
+
+            <label className="field-label">Phone Number (Optional)</label>
+            <div className="input-group">
+              <Phone size={18} color="#5b32d6" />
+              <input
+                type="text"
+                placeholder="e.g., +91 98765 43210"
+                value={setupForm.phone}
+                onChange={(e) => setSetupForm({ ...setupForm, phone: e.target.value })}
               />
             </div>
 
             <button type="submit" className="btn-primary">
-              Open My Dukaan →
+              Start My Dukaan <Sparkles size={17} />
             </button>
           </form>
         </div>
@@ -416,38 +728,37 @@ export default function App() {
     );
   }
 
-  if (!dashboard) return <div style={{ padding: 40 }}>Loading Store Dashboard...</div>;
+  const kpis = dashboard?.kpis || {
+    todays_sales: 0,
+    cash_received: 0,
+    udhaar_pending: 0,
+    cash_balance: 0,
+    net_profit: 0,
+    forecast_range: "Record sales to generate forecast",
+  };
 
-  const { shop, kpis, chart, recent_transactions, gemini_enabled } = dashboard;
-  const maxChartVal = Math.max(...chart.map((c) => Math.max(c.sales, c.expenses)), 1000);
-  const filteredCustomers = customers.filter((c) =>
-    c.name.toLowerCase().includes(customerSearch.toLowerCase())
-  );
-  const totalOutstanding = customers.reduce((acc, c) => acc + c.balance, 0);
-  const initials = shop.owner_name
+  const initials = (shop.owner_name || "DU")
     .split(" ")
-    .map((n) => n[0])
+    .map((part) => part[0])
     .join("")
-    .toUpperCase()
-    .slice(0, 2);
+    .slice(0, 2)
+    .toUpperCase();
 
   const todayFormatted = new Date().toLocaleDateString("en-IN", {
-    day: "2-digit",
+    weekday: "short",
+    day: "numeric",
     month: "short",
     year: "numeric",
-    weekday: "long",
   });
 
   return (
     <div className="app-shell">
-      {/* SIDEBAR */}
       <aside className="sidebar">
         <div>
           <div className="sidebar-logo">
-            <Sparkles size={25} color="#a78bfa" />
+            <Store size={24} color="#a78bfa" />
             <span>DukaanAI</span>
           </div>
-
           <nav className="nav-list">
             {NAV_ITEMS.map((item) => {
               const Icon = item.icon;
@@ -465,761 +776,679 @@ export default function App() {
           </nav>
         </div>
 
-        <button className="nav-item" onClick={handleResetStore}>
-          <RotateCcw size={18} />
-          <span>Reset Store</span>
-        </button>
+        <div style={{ padding: "12px 10px", fontSize: 12, color: "#b7aedc" }}>
+          <div style={{ fontWeight: 700, color: "#ffffff", marginBottom: 2 }}>{shop.shop_name}</div>
+          <div>Owner: {shop.owner_name}</div>
+        </div>
       </aside>
 
-      {/* MAIN WORKSPACE */}
       <div className="main-area">
         <header className="topbar">
           <div className="topbar-left">
-            <Store size={19} color="#5b32d6" />
             <span>{shop.shop_name}</span>
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <button
-              className="voice-bar-btn"
-              onClick={() => {
-                setVoiceStatus("");
-                setVoiceModalOpen(true);
-              }}
+              type="button"
+              className={`voice-bar-btn ${isListening ? "listening" : ""}`}
+              onClick={() => startSpeechRecognition("transaction")}
             >
-              <Mic size={16} />
-              <span>Voice Entry</span>
+              <Mic size={15} />
+              <span>{isListening ? "Listening (Auto-Sends)..." : "Voice Entry"}</span>
             </button>
 
             <button
+              type="button"
               className={`shop-pill ${shop.is_open ? "" : "closed"}`}
               onClick={handleToggleShop}
             >
               <span className="dot" />
-              {shop.is_open ? "Shop Open" : "Shop Closed"}
+              <span>{shop.is_open ? "Shop Open" : "Shop Closed"}</span>
             </button>
-            <Bell size={19} color="#6e678c" />
-            <div className="avatar">{initials || "DK"}</div>
+
+            <button
+              type="button"
+              className="bell-btn"
+              title="Notifications"
+              onClick={() => setNotifOpen((prev) => !prev)}
+            >
+              <Bell size={17} />
+              {unreadCount > 0 && <span className="bell-badge">{unreadCount}</span>}
+            </button>
+
+            <button
+              type="button"
+              className="avatar"
+              title="Open Shop & Owner Profile"
+              onClick={() => setActiveTab("profile")}
+            >
+              {initials}
+            </button>
           </div>
+
+          {notifOpen && (
+            <div className="notif-dropdown">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <strong style={{ fontSize: 14 }}>Notifications ({unreadCount} unread)</strong>
+                <button
+                  type="button"
+                  onClick={handleMarkAllRead}
+                  style={{ background: "none", border: "none", color: "var(--primary)", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+                >
+                  Mark all read
+                </button>
+              </div>
+              {notifications.length === 0 ? (
+                <p style={{ fontSize: 13, color: "var(--text-muted)" }}>No new alerts right now.</p>
+              ) : (
+                notifications.map((n) => {
+                  const isUnread = !readNotifIds.includes(n.id);
+                  return (
+                    <div key={n.id} className={`notif-item ${isUnread ? "unread" : ""}`}>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 700, marginBottom: 2 }}>
+                        <span>{n.title}</span>
+                        <span style={{ fontSize: 11, color: "var(--primary)" }}>{n.badge}</span>
+                      </div>
+                      <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{n.detail}</div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          )}
         </header>
 
+        {toast && (
+          <div style={{ margin: "14px 28px 0", background: "#25195e", color: "#ffffff", padding: "10px 16px", borderRadius: 12, fontSize: 13, fontWeight: 700 }}>
+            {toast}
+          </div>
+        )}
+
         <main className="page-content">
-          {/* 1. DASHBOARD */}
           {activeTab === "dashboard" && (
             <>
               <div className="greeting-row">
                 <div>
-                  <h2>Namaste, {shop.owner_name}! 👋</h2>
-                  <p>Here's your live business overview for today.</p>
+                  <h2>Namaste, {shop.owner_name}!</h2>
+                  <p>Here is the live financial overview for {shop.shop_name}</p>
                 </div>
                 <div className="date-chip">
-                  <Calendar size={16} color="#5b32d6" />
+                  <Calendar size={15} color="#5b32d6" />
                   <span>{todayFormatted}</span>
                 </div>
               </div>
 
               <div className="kpi-grid">
                 <div className="kpi-card tint-purple">
-                  <div className="kpi-icon" style={{ background: "#5b32d6" }}>
-                    <ShoppingCart size={18} />
-                  </div>
-                  <div className="kpi-label">Today's Sales</div>
-                  <div className="kpi-val">
-                    ₹{kpis.todays_sales.toLocaleString("en-IN")}
-                  </div>
+                  <div className="kpi-icon" style={{ background: "#5b32d6" }}><IndianRupee size={17} /></div>
+                  <div className="kpi-label">Today&apos;s Sales</div>
+                  <div className="kpi-val">{formatINR(kpis.todays_sales)}</div>
                 </div>
-
                 <div className="kpi-card tint-green">
-                  <div className="kpi-icon" style={{ background: "#16a34a" }}>
-                    <Wallet size={18} />
-                  </div>
-                  <div className="kpi-label">Cash & UPI Received</div>
-                  <div className="kpi-val">
-                    ₹{kpis.cash_received.toLocaleString("en-IN")}
-                  </div>
+                  <div className="kpi-icon" style={{ background: "#16a34a" }}><Wallet size={17} /></div>
+                  <div className="kpi-label">Cash Received</div>
+                  <div className="kpi-val">{formatINR(kpis.cash_received)}</div>
                 </div>
-
                 <div className="kpi-card tint-amber">
-                  <div className="kpi-icon" style={{ background: "#f59e0b" }}>
-                    <IndianRupee size={18} />
-                  </div>
+                  <div className="kpi-icon" style={{ background: "#ea580c" }}><Clock size={17} /></div>
                   <div className="kpi-label">Udhaar Pending</div>
-                  <div className="kpi-val">
-                    ₹{kpis.udhaar_pending.toLocaleString("en-IN")}
-                  </div>
+                  <div className="kpi-val">{formatINR(kpis.udhaar_pending)}</div>
                 </div>
-
                 <div className="kpi-card tint-blue">
-                  <div className="kpi-icon" style={{ background: "#2563eb" }}>
-                    <Landmark size={18} />
-                  </div>
+                  <div className="kpi-icon" style={{ background: "#2563eb" }}><IndianRupee size={17} /></div>
                   <div className="kpi-label">Cash Balance</div>
-                  <div className="kpi-val">
-                    ₹{kpis.cash_balance.toLocaleString("en-IN")}
-                  </div>
+                  <div className="kpi-val">{formatINR(kpis.cash_balance)}</div>
                 </div>
-
                 <div className="kpi-card tint-mint">
-                  <div className="kpi-icon" style={{ background: "#0d9488" }}>
-                    <TrendingUp size={18} />
-                  </div>
-                  <div className="kpi-label">Net Profit (Est.)</div>
-                  <div className="kpi-val">
-                    ₹{kpis.net_profit.toLocaleString("en-IN")}
-                  </div>
+                  <div className="kpi-icon" style={{ background: "#0d9488" }}><TrendingUp size={17} /></div>
+                  <div className="kpi-label">Net Profit</div>
+                  <div className="kpi-val">{formatINR(kpis.net_profit)}</div>
                 </div>
               </div>
 
               <div className="mid-grid">
                 <div className="card">
                   <div className="card-header">
-                    <h3>Sales & Expenses Overview</h3>
-                    <div style={{ display: "flex", gap: 14, fontSize: 12, fontWeight: 700 }}>
-                      <span style={{ color: "#5b32d6" }}>● Sales</span>
-                      <span style={{ color: "#f59e0b" }}>● Expenses</span>
-                    </div>
+                    <h3>Sales vs. Expenses (Last 7 Days)</h3>
                   </div>
-
-                  <svg viewBox="0 0 520 190" style={{ width: "100%", height: 190 }}>
-                    {[0, 1, 2, 3].map((step) => {
-                      const y = 155 - step * 42;
-                      const labelVal = Math.round((maxChartVal / 3) * step);
-                      return (
-                        <g key={step}>
-                          <line x1="48" y1={y} x2="500" y2={y} stroke="#eeeaf9" />
-                          <text x="4" y={y + 4} fontSize="10" fill="#8b83a8">
-                            ₹{labelVal}
-                          </text>
-                        </g>
-                      );
-                    })}
-
-                    <polyline
-                      fill="none"
-                      stroke="#5b32d6"
-                      strokeWidth="3"
-                      points={chart
-                        .map((d, i) => {
-                          const x = 68 + i * 68;
-                          const y = 155 - (d.sales / maxChartVal) * 126;
-                          return `${x},${y}`;
-                        })
-                        .join(" ")}
-                    />
-                    <polyline
-                      fill="none"
-                      stroke="#f59e0b"
-                      strokeWidth="3"
-                      points={chart
-                        .map((d, i) => {
-                          const x = 68 + i * 68;
-                          const y = 155 - (d.expenses / maxChartVal) * 126;
-                          return `${x},${y}`;
-                        })
-                        .join(" ")}
-                    />
-
-                    {chart.map((d, i) => {
-                      const x = 68 + i * 68;
-                      const sy = 155 - (d.sales / maxChartVal) * 126;
-                      const ey = 155 - (d.expenses / maxChartVal) * 126;
-                      return (
-                        <g key={d.day}>
-                          <circle cx={x} cy={sy} r="4.5" fill="#5b32d6" />
-                          <circle cx={x} cy={ey} r="4.5" fill="#f59e0b" />
-                          <text x={x - 12} y="180" fontSize="11" fill="#6e678c">
-                            {d.day}
-                          </text>
-                        </g>
-                      );
-                    })}
-                  </svg>
+                  <div style={{ width: "100%", height: 260 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={dashboard?.chart || []}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#efeafd" />
+                        <XAxis dataKey="day" />
+                        <YAxis />
+                        <Tooltip />
+                        <Legend />
+                        <Bar dataKey="sales" name="Sales (₹)" fill="#5b32d6" radius={[6, 6, 0, 0]} />
+                        <Bar dataKey="expenses" name="Expenses (₹)" fill="#f59e0b" radius={[6, 6, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
                 </div>
 
                 <div className="card">
                   <div className="card-header">
                     <h3>Recent Transactions</h3>
-                    <button
-                      className="btn-outline"
-                      onClick={() => setActiveTab("transactions")}
-                    >
-                      View All →
+                    <button type="button" className="btn-outline" onClick={() => setActiveTab("transactions")}>
+                      View All
                     </button>
                   </div>
-
-                  {recent_transactions.length === 0 ? (
-                    <div style={{ color: "#6e678c", fontSize: 14, padding: "24px 0", textAlign: "center" }}>
-                      No transactions yet. Click <strong>Sales</strong> or <strong>Voice Entry</strong> to record your first transaction!
-                    </div>
+                  {(dashboard?.recent_transactions || []).length === 0 ? (
+                    <p style={{ color: "var(--text-muted)", fontSize: 13 }}>No transactions recorded yet.</p>
                   ) : (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                      {recent_transactions.slice(0, 4).map((tx) => {
-                        const isExp = tx.tx_type === "expense";
-                        return (
-                          <div
-                            key={tx.id}
-                            style={{
-                              display: "flex",
-                              justifyContent: "space-between",
-                              alignItems: "center",
-                              paddingBottom: 10,
-                              borderBottom: "1px solid #f2effb",
-                            }}
-                          >
-                            <div>
-                              <div style={{ fontWeight: 700, fontSize: 14 }}>{tx.title}</div>
-                              <div style={{ fontSize: 12, color: "#6e678c" }}>
-                                {tx.tx_date} • {tx.tx_time}
-                              </div>
-                            </div>
-                            <div
-                              style={{
-                                fontWeight: 800,
-                                color: isExp ? "#dc2626" : "#16a34a",
-                              }}
-                            >
-                              {isExp ? `-₹${tx.amount}` : `+₹${tx.amount.toLocaleString("en-IN")}`}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Entry</th>
+                          <th>Mode</th>
+                          <th>Amount</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(dashboard?.recent_transactions || []).map((tx) => (
+                          <tr key={tx.id}>
+                            <td>
+                              <div style={{ fontWeight: 700 }}>{tx.title}</div>
+                              <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{tx.tx_time}</div>
+                            </td>
+                            <td>{tx.payment_method}</td>
+                            <td style={{ fontWeight: 700, color: tx.tx_type === "expense" ? "#dc2626" : "#15803d" }}>
+                              {tx.tx_type === "expense" ? "-" : "+"}
+                              {formatINR(tx.amount)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   )}
                 </div>
               </div>
 
               <div className="forecast-banner">
-                <div style={{ fontWeight: 700, fontSize: 15 }}>
-                  ✨ Cash-flow forecast for next week:{" "}
-                  <span style={{ color: "#5b32d6", fontWeight: 800 }}>
-                    {kpis.forecast_range}
-                  </span>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#5b32d6" }}>7-DAY CASH-FLOW FORECAST</div>
+                  <div style={{ fontSize: 18, fontWeight: 800, marginTop: 2 }}>{kpis.forecast_range}</div>
                 </div>
-                <button className="btn-outline" onClick={() => setActiveTab("reports")}>
-                  View Prediction →
+                <button type="button" className="btn-outline" onClick={() => setActiveTab("assistant")}>
+                  Ask DukaanAI Bot
                 </button>
               </div>
             </>
           )}
 
-          {/* 2. ADD NEW SALE */}
+          {activeTab === "transactions" && (
+            <div className="card">
+              <div className="card-header">
+                <h3>All Transactions</h3>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Date & Time</th>
+                    <th>Description</th>
+                    <th>Category</th>
+                    <th>Payment</th>
+                    <th>Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {transactions.map((t) => (
+                    <tr key={t.id}>
+                      <td>{t.tx_date} • {t.tx_time}</td>
+                      <td style={{ fontWeight: 700 }}>{t.title}</td>
+                      <td>{t.category}</td>
+                      <td>{t.payment_method}</td>
+                      <td style={{ fontWeight: 700, color: t.tx_type === "expense" ? "#dc2626" : "#15803d" }}>
+                        {t.tx_type === "expense" ? "-" : "+"}
+                        {formatINR(t.amount)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
           {activeTab === "sales" && (
             <div className="sale-grid">
-              <div className="card">
+              <form className="card" onSubmit={handleRecordSale}>
                 <div className="card-header">
-                  <h3>← Add New Sale</h3>
-                  <button
-                    className="btn-outline"
-                    onClick={() => {
-                      setVoiceStatus("");
-                      setVoiceModalOpen(true);
-                    }}
-                  >
-                    <Mic size={15} /> Speak Sale
-                  </button>
+                  <h3>Record New Sale</h3>
                 </div>
 
                 <div className="tab-row">
-                  <button
-                    className={`tab-btn ${saleMode === "custom" ? "active" : ""}`}
-                    onClick={() => setSaleMode("custom")}
-                  >
-                    Manual Item Entry
-                  </button>
-                  <button
-                    className={`tab-btn ${saleMode === "quick" ? "active" : ""}`}
-                    onClick={() => setSaleMode("quick")}
-                  >
-                    From Inventory ({products.length})
-                  </button>
-                </div>
-
-                {saleMode === "quick" ? (
-                  <>
-                    <label className="field-label">Select Product from Inventory</label>
-                    {products.length === 0 ? (
-                      <p style={{ fontSize: 13, color: "#6e678c", marginBottom: 14 }}>
-                        No inventory items added yet. Switch to <strong>Manual Item Entry</strong> or add items in the <strong>Inventory</strong> tab.
-                      </p>
-                    ) : (
-                      <div className="input-group">
-                        <select
-                          value={selectedProductId}
-                          onChange={(e) => setSelectedProductId(e.target.value)}
-                        >
-                          {products.map((p) => (
-                            <option key={p.id} value={p.id}>
-                              {p.name} (₹{p.price}/{p.unit}) — Stock: {p.stock}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 12 }}>
-                    <div>
-                      <label className="field-label">Item / Description *</label>
-                      <div className="input-group">
-                        <input
-                          placeholder="e.g. Groceries / Rice 5kg"
-                          value={customItemName}
-                          onChange={(e) => setCustomItemName(e.target.value)}
-                        />
-                      </div>
-                    </div>
-                    <div>
-                      <label className="field-label">Unit Price (₹) *</label>
-                      <div className="input-group">
-                        <input
-                          type="number"
-                          min="1"
-                          placeholder="0"
-                          value={customItemPrice}
-                          onChange={(e) => setCustomItemPrice(e.target.value)}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                <label className="field-label">Quantity</label>
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 14,
-                    margin: "6px 0 18px",
-                  }}
-                >
-                  <button
-                    className="btn-outline"
-                    onClick={() => setQuantity((q) => Math.max(1, q - 1))}
-                  >
-                    -
-                  </button>
-                  <span style={{ fontWeight: 800, fontSize: 16 }}>{quantity}</span>
-                  <button
-                    className="btn-outline"
-                    onClick={() => setQuantity((q) => q + 1)}
-                  >
-                    +
-                  </button>
-                </div>
-
-                <label className="field-label">Payment Method</label>
-                <div style={{ display: "flex", gap: 18, margin: "6px 0 18px" }}>
-                  {["Cash", "UPI", "Credit"].map((m) => (
-                    <label
-                      key={m}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 6,
-                        fontWeight: 700,
-                        fontSize: 14,
-                        cursor: "pointer",
-                      }}
+                  {["Cash", "UPI", "Credit"].map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      className={`tab-btn ${paymentMethod === mode ? "active" : ""}`}
+                      onClick={() => setPaymentMethod(mode)}
                     >
-                      <input
-                        type="radio"
-                        name="payMethod"
-                        checked={paymentMethod === m}
-                        onChange={() => setPaymentMethod(m)}
-                      />
-                      {m}
-                    </label>
+                      {mode === "Credit" ? "Credit (Udhaar)" : mode}
+                    </button>
                   ))}
                 </div>
 
-                <label className="field-label">
-                  Customer {paymentMethod === "Credit" ? "(Required for Udhaar)" : "(Optional)"}
-                </label>
+                <label className="field-label">Select Product from Inventory (Optional)</label>
                 <div className="input-group">
-                  <select
-                    value={selectedCustomerId}
-                    onChange={(e) => setSelectedCustomerId(e.target.value)}
-                  >
-                    <option value="">Select Customer</option>
-                    {customers.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name} {c.phone ? `(${c.phone})` : ""}
+                  <select value={selectedProductId} onChange={(e) => handleProductSelect(e.target.value)}>
+                    <option value="">-- Choose product or type custom item below --</option>
+                    {products.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} ({p.stock} {p.unit} left @ ₹{p.price})
                       </option>
                     ))}
                   </select>
                 </div>
 
-                <button className="btn-primary" onClick={handleSaveSale}>
-                  Save Sale ✓
-                </button>
-              </div>
-
-              <div className="receipt-card">
-                <div>
-                  <div style={{ textAlign: "center", marginBottom: 20 }}>
-                    <div style={{ fontWeight: 800, fontSize: 20, color: "#25195e" }}>
-                      DukaanAI
+                {!selectedProductId && (
+                  <>
+                    <label className="field-label">Item / Sale Name</label>
+                    <div className="input-group">
+                      <input
+                        type="text"
+                        placeholder="e.g., Basmati Rice 2kg or Kirana Items"
+                        value={customItemName}
+                        onChange={(e) => setCustomItemName(e.target.value)}
+                      />
                     </div>
-                    <div style={{ fontSize: 13, color: "#6e678c" }}>{shop.shop_name}</div>
-                  </div>
+                  </>
+                )}
 
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      padding: "12px 0",
-                      borderBottom: "1px solid #e5e0f7",
-                    }}
-                  >
-                    <span>{activeItemLabel}</span>
-                    <span>x{quantity}</span>
-                    <strong>₹{activeTotal}</strong>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                  <div>
+                    <label className="field-label">Quantity</label>
+                    <div className="input-group">
+                      <input
+                        type="number"
+                        min="1"
+                        value={quantity}
+                        onChange={(e) => setQuantity(e.target.value)}
+                      />
+                    </div>
                   </div>
-
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      padding: "16px 0",
-                      fontSize: 18,
-                      fontWeight: 800,
-                    }}
-                  >
-                    <span>Total</span>
-                    <span>₹{activeTotal}</span>
-                  </div>
-
-                  <div style={{ fontSize: 14 }}>
-                    Payment: <strong>{paymentMethod}</strong>
+                  <div>
+                    <label className="field-label">Unit Price (₹)</label>
+                    <div className="input-group">
+                      <input
+                        type="number"
+                        step="any"
+                        placeholder="0"
+                        value={unitPrice}
+                        onChange={(e) => setUnitPrice(e.target.value)}
+                      />
+                    </div>
                   </div>
                 </div>
 
-                {saleSuccess && (
-                  <div
-                    style={{
-                      marginTop: 20,
-                      background: "#dcfce7",
-                      color: "#15803d",
-                      padding: 14,
-                      borderRadius: 12,
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 10,
-                      fontWeight: 700,
-                    }}
-                  >
-                    <CheckCircle2 size={20} />
-                    <span>{saleSuccess}</span>
-                  </div>
+                <label className="field-label">
+                  Customer Name {paymentMethod === "Credit" ? "*" : "(Select existing or type new name)"}
+                </label>
+                <div className="input-group">
+                  <User size={17} color="#5b32d6" />
+                  <input
+                    type="text"
+                    list="sales-customer-list"
+                    placeholder="Type customer name or pick from list..."
+                    value={customerInputName}
+                    onChange={(e) => handleCustomerNameInput(e.target.value)}
+                  />
+                  <datalist id="sales-customer-list">
+                    {customers.map((c) => (
+                      <option key={c.id} value={c.name} />
+                    ))}
+                  </datalist>
+                </div>
+
+                {paymentMethod === "Credit" && (
+                  <>
+                    <label className="field-label">Due Date (Optional)</label>
+                    <div className="input-group">
+                      <input
+                        type="text"
+                        placeholder="e.g., 28 Nov"
+                        value={dueDate}
+                        onChange={(e) => setDueDate(e.target.value)}
+                      />
+                    </div>
+                  </>
                 )}
+
+                <button type="submit" className="btn-primary">
+                  <Plus size={18} /> Record Sale ({formatINR((Number(quantity || 1)) * (Number(unitPrice || 0)))})
+                </button>
+              </form>
+
+              <div className="receipt-card">
+                <div>
+                  <h3 style={{ fontSize: 18, fontWeight: 800, marginBottom: 6 }}>Live Sale Receipt</h3>
+                  <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 20 }}>
+                    {lastReceipt ? "Last recorded bill summary" : "Record a sale on the left to generate a receipt"}
+                  </p>
+                  {lastReceipt && (
+                    <div style={{ background: "#ffffff", borderRadius: 14, padding: 18, border: "1px solid var(--border-light)" }}>
+                      <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>{shop.shop_name}</div>
+                      <div style={{ fontSize: 13, marginBottom: 6 }}><strong>Entry:</strong> {lastReceipt.title}</div>
+                      <div style={{ fontSize: 13, marginBottom: 6 }}><strong>Customer:</strong> {lastReceipt.customerName}</div>
+                      <div style={{ fontSize: 13, marginBottom: 6 }}><strong>Payment:</strong> {lastReceipt.paymentMethod}</div>
+                      <div style={{ fontSize: 13, marginBottom: 10 }}><strong>Time:</strong> {lastReceipt.time}</div>
+                      <div style={{ fontSize: 20, fontWeight: 800, color: "var(--primary)", borderTop: "1px dashed #ddd", paddingTop: 10 }}>
+                        Total: {formatINR(lastReceipt.total)}
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 16 }}>
+                  Tip: Typing a new customer name automatically adds them to Udhaar Book when recorded.
+                </div>
               </div>
             </div>
           )}
 
-          {/* 3. UDHAAR BOOK */}
           {activeTab === "udhaar" && (
-            <div className="card">
-              <div className="card-header">
-                <h3>← Customer Credit Ledger (Udhaar Book)</h3>
-                <button
-                  className="btn-primary"
-                  style={{ width: "auto" }}
-                  onClick={() => setShowAddCustomer(!showAddCustomer)}
-                >
-                  <Plus size={16} /> Add Customer
-                </button>
-              </div>
-
-              {showAddCustomer && (
-                <form
-                  onSubmit={handleAddCustomer}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "1fr 1fr 1fr auto",
-                    gap: 12,
-                    marginBottom: 18,
-                    background: "#f8f7fd",
-                    padding: 14,
-                    borderRadius: 12,
-                  }}
-                >
+            <div style={{ display: "grid", gap: 20 }}>
+              <form className="card" onSubmit={handleAddCustomer}>
+                <div className="card-header">
+                  <h3>Add Customer / Udhaar Entry</h3>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
                   <input
+                    type="text"
                     placeholder="Customer Name *"
                     value={newCustName}
                     onChange={(e) => setNewCustName(e.target.value)}
-                    required
-                    style={{ padding: 10, borderRadius: 8, border: "1px solid #ddd" }}
+                    style={{ padding: 11, borderRadius: 10, border: "1.5px solid var(--border-light)" }}
                   />
                   <input
+                    type="text"
                     placeholder="Phone Number"
                     value={newCustPhone}
                     onChange={(e) => setNewCustPhone(e.target.value)}
-                    style={{ padding: 10, borderRadius: 8, border: "1px solid #ddd" }}
+                    style={{ padding: 11, borderRadius: 10, border: "1.5px solid var(--border-light)" }}
                   />
                   <input
                     type="number"
-                    min="0"
-                    placeholder="Opening Credit (₹)"
+                    step="any"
+                    placeholder="Udhaar Amount (₹)"
                     value={newCustCredit}
                     onChange={(e) => setNewCustCredit(e.target.value)}
-                    style={{ padding: 10, borderRadius: 8, border: "1px solid #ddd" }}
+                    style={{ padding: 11, borderRadius: 10, border: "1.5px solid var(--border-light)" }}
                   />
-                  <button type="submit" className="btn-primary" style={{ width: "auto" }}>
-                    Save
+                  <input
+                    type="text"
+                    placeholder="Due Date (e.g. 30 Nov)"
+                    value={newCustDue}
+                    onChange={(e) => setNewCustDue(e.target.value)}
+                    style={{ padding: 11, borderRadius: 10, border: "1.5px solid var(--border-light)" }}
+                  />
+                </div>
+                <div style={{ marginTop: 14 }}>
+                  <button type="submit" className="btn-outline">
+                    <Plus size={16} /> Save to Udhaar Book
                   </button>
-                </form>
-              )}
+                </div>
+              </form>
 
-              <div className="input-group" style={{ maxWidth: 360 }}>
-                <Search size={17} color="#6e678c" />
-                <input
-                  placeholder="Search customer..."
-                  value={customerSearch}
-                  onChange={(e) => setCustomerSearch(e.target.value)}
-                />
-              </div>
-
-              {filteredCustomers.length === 0 ? (
-                <p style={{ color: "#6e678c", padding: "20px 0", textAlign: "center" }}>
-                  No customers added yet. Click <strong>+ Add Customer</strong> or record a Credit sale by voice.
-                </p>
-              ) : (
+              <div className="card">
+                <div className="card-header">
+                  <h3>Customer Udhaar Ledger</h3>
+                </div>
                 <table>
                   <thead>
                     <tr>
                       <th>Customer</th>
+                      <th>Phone</th>
                       <th>Total Credit</th>
                       <th>Paid</th>
-                      <th>Balance</th>
+                      <th>Balance Due</th>
                       <th>Due Date</th>
                       <th>Status</th>
-                      <th>Action</th>
+                      <th>Record Payment</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredCustomers.map((c) => (
+                    {customers.map((c) => (
                       <tr key={c.id}>
-                        <td>
-                          <strong>{c.name}</strong>
-                          {c.phone && <div style={{ fontSize: 12, color: "#6e678c" }}>{c.phone}</div>}
+                        <td style={{ fontWeight: 700 }}>{c.name}</td>
+                        <td>{c.phone || "—"}</td>
+                        <td>{formatINR(c.total_credit)}</td>
+                        <td>{formatINR(c.paid)}</td>
+                        <td style={{ fontWeight: 800, color: c.balance > 0 ? "#c2410c" : "#15803d" }}>
+                          {formatINR(c.balance)}
                         </td>
-                        <td>₹{c.total_credit.toLocaleString("en-IN")}</td>
-                        <td>₹{c.paid.toLocaleString("en-IN")}</td>
-                        <td style={{ fontWeight: 800, color: c.balance > 0 ? "#dc2626" : "#15803d" }}>
-                          ₹{c.balance.toLocaleString("en-IN")}
-                        </td>
-                        <td>{c.due_date}</td>
+                        <td>{c.due_date || "—"}</td>
                         <td>
-                          <span
-                            className={`badge ${
-                              c.status === "Cleared" ? "badge-cleared" : "badge-due"
-                            }`}
-                          >
+                          <span className={`badge ${c.balance > 0 ? "badge-due" : "badge-cleared"}`}>
                             {c.status}
                           </span>
                         </td>
                         <td>
                           {c.balance > 0 ? (
-                            <button
-                              className="btn-outline"
-                              onClick={() => handleSettleCustomer(c)}
-                            >
-                              Record Payment
-                            </button>
+                            <div style={{ display: "flex", gap: 6 }}>
+                              <input
+                                type="number"
+                                placeholder="₹ Amt"
+                                value={payAmounts[c.id] || ""}
+                                onChange={(e) => setPayAmounts((prev) => ({ ...prev, [c.id]: e.target.value }))}
+                                style={{ width: 84, padding: "6px 8px", borderRadius: 8, border: "1px solid var(--border-light)" }}
+                              />
+                              <button type="button" className="btn-outline" onClick={() => handleCustomerPayment(c.id)}>
+                                Settle
+                              </button>
+                            </div>
                           ) : (
-                            <span style={{ fontSize: 12, color: "#6e678c" }}>Settled</span>
+                            <span>Settled</span>
                           )}
                         </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
-              )}
-
-              <div
-                style={{
-                  marginTop: 22,
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  background: "#f4f2fc",
-                  padding: 16,
-                  borderRadius: 14,
-                }}
-              >
-                <div>
-                  <div style={{ fontSize: 12, color: "#6e678c", fontWeight: 700 }}>
-                    Total Outstanding
-                  </div>
-                  <div style={{ fontSize: 22, fontWeight: 800, color: "#5b32d6" }}>
-                    ₹{totalOutstanding.toLocaleString("en-IN")}
-                  </div>
-                </div>
-
-                <button
-                  className="btn-primary"
-                  style={{ width: "auto" }}
-                  onClick={() => {
-                    setReminderToast("Payment reminders queued for customers with pending balances!");
-                    setTimeout(() => setReminderToast(""), 3500);
-                  }}
-                >
-                  Send Reminders
-                </button>
               </div>
-
-              {reminderToast && (
-                <div style={{ marginTop: 12, color: "#15803d", fontWeight: 700, fontSize: 13 }}>
-                  ✓ {reminderToast}
-                </div>
-              )}
             </div>
           )}
 
-          {/* 4. REPORTS */}
+          {activeTab === "expenses" && (
+            <div className="sale-grid">
+              <form className="card" onSubmit={handleAddExpense}>
+                <div className="card-header">
+                  <h3>Add Shop Expense</h3>
+                </div>
+                <label className="field-label">Expense Title</label>
+                <div className="input-group">
+                  <input
+                    type="text"
+                    placeholder="e.g., Shop Electricity Bill"
+                    value={expTitle}
+                    onChange={(e) => setExpTitle(e.target.value)}
+                  />
+                </div>
+                <label className="field-label">Category</label>
+                <div className="input-group">
+                  <select value={expCategory} onChange={(e) => setExpCategory(e.target.value)}>
+                    <option value="Electricity">Electricity</option>
+                    <option value="Rent">Rent</option>
+                    <option value="Others">Others</option>
+                  </select>
+                </div>
+                <label className="field-label">Amount (₹)</label>
+                <div className="input-group">
+                  <input
+                    type="number"
+                    step="any"
+                    placeholder="0"
+                    value={expAmount}
+                    onChange={(e) => setExpAmount(e.target.value)}
+                  />
+                </div>
+                <label className="field-label">Payment Method</label>
+                <div className="input-group">
+                  <select value={expMethod} onChange={(e) => setExpMethod(e.target.value)}>
+                    <option value="Cash">Cash</option>
+                    <option value="UPI">UPI</option>
+                  </select>
+                </div>
+                <button type="submit" className="btn-primary">Save Expense</button>
+              </form>
+
+              <div className="card">
+                <div className="card-header">
+                  <h3>Recorded Expenses</h3>
+                </div>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Title</th>
+                      <th>Category</th>
+                      <th>Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {transactions
+                      .filter((t) => t.tx_type === "expense")
+                      .map((eItem) => (
+                        <tr key={eItem.id}>
+                          <td style={{ fontWeight: 700 }}>{eItem.title}</td>
+                          <td>{eItem.category}</td>
+                          <td style={{ fontWeight: 700, color: "#dc2626" }}>-{formatINR(eItem.amount)}</td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "inventory" && (
+            <div className="sale-grid">
+              <form className="card" onSubmit={handleAddProduct}>
+                <div className="card-header">
+                  <h3>Add Inventory Item</h3>
+                </div>
+                <label className="field-label">Product Name</label>
+                <div className="input-group">
+                  <input
+                    type="text"
+                    placeholder="e.g., Toor Dal"
+                    value={prodName}
+                    onChange={(e) => setProdName(e.target.value)}
+                  />
+                </div>
+                <label className="field-label">Unit</label>
+                <div className="input-group">
+                  <input
+                    type="text"
+                    placeholder="kg / packet / litre / pcs"
+                    value={prodUnit}
+                    onChange={(e) => setProdUnit(e.target.value)}
+                  />
+                </div>
+                <label className="field-label">Selling Price (₹)</label>
+                <div className="input-group">
+                  <input
+                    type="number"
+                    step="any"
+                    placeholder="0"
+                    value={prodPrice}
+                    onChange={(e) => setProdPrice(e.target.value)}
+                  />
+                </div>
+                <label className="field-label">Opening Stock</label>
+                <div className="input-group">
+                  <input
+                    type="number"
+                    placeholder="0"
+                    value={prodStock}
+                    onChange={(e) => setProdStock(e.target.value)}
+                  />
+                </div>
+                <button type="submit" className="btn-primary">Add to Inventory</button>
+              </form>
+
+              <div className="card">
+                <div className="card-header">
+                  <h3>Current Stock (Alert ≤ {threshold})</h3>
+                </div>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Item</th>
+                      <th>Price</th>
+                      <th>Stock</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {products.map((p) => (
+                      <tr key={p.id}>
+                        <td style={{ fontWeight: 700 }}>{p.name}</td>
+                        <td>{formatINR(p.price)} / {p.unit}</td>
+                        <td>
+                          <span className={`badge ${p.stock <= threshold ? "badge-due" : "badge-cleared"}`}>
+                            {p.stock} {p.unit}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
           {activeTab === "reports" && (
             <div className="card">
               <div className="card-header">
-                <h3>Sales & Expense Reports</h3>
-                <button
-                  className="btn-primary"
-                  style={{ width: "auto" }}
-                  onClick={() => window.print()}
-                >
-                  <Download size={16} /> Download Report
-                </button>
+                <h3>Expense Breakdown Report</h3>
               </div>
-
-              <div className="mid-grid">
-                <div>
-                  <h4 style={{ marginBottom: 14 }}>Sales vs Expenses (Last 7 Days)</h4>
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "flex-end",
-                      gap: 18,
-                      height: 190,
-                      padding: "16px 10px",
-                      background: "#faf9fe",
-                      borderRadius: 14,
-                    }}
-                  >
-                    {chart.map((d) => (
-                      <div
-                        key={d.day}
-                        style={{
-                          flex: 1,
-                          display: "flex",
-                          flexDirection: "column",
-                          alignItems: "center",
-                          gap: 6,
-                        }}
-                      >
-                        <div style={{ display: "flex", alignItems: "flex-end", gap: 4, height: 130 }}>
-                          <div
-                            style={{
-                              width: 12,
-                              height: `${Math.max(6, (d.sales / maxChartVal) * 125)}px`,
-                              background: "#5b32d6",
-                              borderRadius: 4,
-                            }}
-                          />
-                          <div
-                            style={{
-                              width: 12,
-                              height: `${Math.max(6, (d.expenses / maxChartVal) * 125)}px`,
-                              background: "#f59e0b",
-                              borderRadius: 4,
-                            }}
-                          />
-                        </div>
-                        <span style={{ fontSize: 12, fontWeight: 700 }}>{d.day}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <h4 style={{ marginBottom: 14 }}>Expense Categories</h4>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                    {reports.expense_breakdown.map((item, idx) => {
-                      const colors = ["#5b32d6", "#f59e0b", "#10b981"];
-                      return (
-                        <div
-                          key={item.category}
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            padding: 12,
-                            borderRadius: 12,
-                            background: "#f8f7fd",
-                          }}
-                        >
-                          <span style={{ fontWeight: 700 }}>
-                            <span style={{ color: colors[idx % 3] }}>● </span>
-                            {item.category}
-                          </span>
-                          <strong>
-                            ₹{item.amount.toLocaleString("en-IN")} ({item.percent}%)
-                          </strong>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Category</th>
+                    <th>Total Spend</th>
+                    <th>Share</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(reports.expense_breakdown || []).map((row) => (
+                    <tr key={row.category}>
+                      <td style={{ fontWeight: 700 }}>{row.category}</td>
+                      <td>{formatINR(row.amount)}</td>
+                      <td>{row.percent}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
 
-          {/* 5. DUKAANAI ASSISTANT (CHAT + VOICE) */}
           {activeTab === "assistant" && (
             <div className="chat-box">
-              <div style={{ textAlign: "center", marginBottom: 18 }}>
-                <div
-                  style={{
-                    width: 64,
-                    height: 64,
-                    borderRadius: "50%",
-                    background: "#ebe4ff",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    marginBottom: 8,
-                  }}
-                >
-                  <Bot size={34} color="#5b32d6" />
-                </div>
-                <h3>DukaanAI Assistant ✨</h3>
-                <div style={{ fontSize: 12, color: "#6e678c", marginTop: 4 }}>
-                  {gemini_enabled
-                    ? "Connected to Google Gemini API"
-                    : "Smart Local Mode (Add GEMINI_API_KEY in backend/.env for full Gemini LLM)"}
-                </div>
+              <div className="card-header">
+                <h3>DukaanAI Assistant (Answers Any Shop or Business Question)</h3>
               </div>
 
-              <div
-                style={{
-                  maxHeight: 280,
-                  overflowY: "auto",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 10,
-                  marginBottom: 16,
-                }}
-              >
-                {messages.map((m, i) => (
+              <div className="chip-grid">
+                {QUICK_PROMPTS.map((q) => (
+                  <button key={q} type="button" className="prompt-chip" onClick={() => handleSendChat(q)}>
+                    {q}
+                  </button>
+                ))}
+              </div>
+
+              <div style={{ maxHeight: 340, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, marginBottom: 14 }}>
+                {messages.map((m, idx) => (
                   <div
-                    key={i}
+                    key={idx}
                     style={{
-                      alignSelf: m.sender === "user" ? "flex-end" : "flex-start",
-                      background: m.sender === "user" ? "#5b32d6" : "#f3effe",
-                      color: m.sender === "user" ? "#ffffff" : "#1d163b",
+                      alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+                      background: m.role === "user" ? "var(--primary)" : "#f5f2ff",
+                      color: m.role === "user" ? "#ffffff" : "var(--text-dark)",
                       padding: "11px 15px",
                       borderRadius: 14,
-                      maxWidth: "82%",
+                      maxWidth: "85%",
                       fontSize: 14,
-                      lineHeight: 1.5,
+                      lineHeight: 1.45,
                     }}
                   >
                     {m.text}
@@ -1227,280 +1456,146 @@ export default function App() {
                 ))}
               </div>
 
-              <div className="chip-grid">
-                {[
-                  "What's my profit today?",
-                  "Show pending Udhaar balances",
-                  "Predict next week's cash flow",
-                  "Check inventory stock",
-                ].map((q) => (
-                  <button key={q} className="prompt-chip" onClick={() => sendChat(q)}>
-                    {q}
-                  </button>
-                ))}
-              </div>
-
-              <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input
+                  type="text"
+                  placeholder="Ask any question or say 'Sold 2 kg Rice for 120 Cash'..."
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleSendChat()}
+                  style={{ flex: 1, padding: "12px 14px", borderRadius: 12, border: "1.5px solid var(--border-light)" }}
+                />
                 <button
+                  type="button"
                   className="btn-outline"
-                  onClick={() =>
-                    isListening ? stopSpeechRecognition() : startSpeechRecognition("chat")
-                  }
-                  title="Speak into mic"
+                  title="Speak & auto-send question"
+                  onClick={() => startSpeechRecognition("assistant")}
                 >
-                  {isListening ? <MicOff size={18} color="#dc2626" /> : <Mic size={18} />}
+                  <Mic size={16} />
                 </button>
-                <div className="input-group" style={{ flex: 1, marginBottom: 0 }}>
-                  <input
-                    placeholder="Ask DukaanAI or say 'Sold 2 kg Sugar for 90 Cash'..."
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && sendChat()}
-                  />
+                <button type="button" className="btn-primary" style={{ width: "auto" }} onClick={() => handleSendChat()}>
+                  <Send size={16} /> {chatSending ? "..." : "Ask"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {activeTab === "profile" && (
+            <form className="card" style={{ maxWidth: 680 }} onSubmit={handleProfileSave}>
+              <div className="card-header">
+                <h3>Shop & Owner Profile</h3>
+              </div>
+
+              {profileSavedMsg && (
+                <div style={{ background: "#ecfdf5", color: "#15803d", padding: "10px 14px", borderRadius: 10, marginBottom: 14, fontWeight: 700, fontSize: 13 }}>
+                  <CheckCircle2 size={15} style={{ verticalAlign: "middle", marginRight: 6 }} />
+                  {profileSavedMsg}
                 </div>
-                <button
-                  className="btn-primary"
-                  style={{ width: "auto" }}
-                  onClick={() => sendChat()}
-                >
-                  <Send size={16} />
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* 6. TRANSACTIONS */}
-          {activeTab === "transactions" && (
-            <div className="card">
-              <div className="card-header">
-                <h3>All Shop Transactions</h3>
-              </div>
-              {transactions.length === 0 ? (
-                <p style={{ color: "#6e678c", textAlign: "center", padding: 20 }}>
-                  No transactions recorded yet.
-                </p>
-              ) : (
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Description</th>
-                      <th>Category</th>
-                      <th>Method</th>
-                      <th>Time</th>
-                      <th>Amount</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {transactions.map((tx) => (
-                      <tr key={tx.id}>
-                        <td>
-                          <strong>{tx.title}</strong>
-                        </td>
-                        <td>{tx.category}</td>
-                        <td>{tx.payment_method}</td>
-                        <td>
-                          {tx.tx_date} • {tx.tx_time}
-                        </td>
-                        <td
-                          style={{
-                            fontWeight: 800,
-                            color: tx.tx_type === "expense" ? "#dc2626" : "#16a34a",
-                          }}
-                        >
-                          {tx.tx_type === "expense" ? `-₹${tx.amount}` : `+₹${tx.amount}`}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
               )}
-            </div>
-          )}
 
-          {/* 7. EXPENSES */}
-          {activeTab === "expenses" && (
-            <div className="card">
-              <div className="card-header">
-                <h3>Record Shop Expense</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <div>
+                  <label className="field-label">Shop Name *</label>
+                  <div className="input-group">
+                    <Store size={17} color="#5b32d6" />
+                    <input
+                      type="text"
+                      value={profileForm.shop_name}
+                      onChange={(e) => setProfileForm({ ...profileForm, shop_name: e.target.value })}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="field-label">Owner Name *</label>
+                  <div className="input-group">
+                    <User size={17} color="#5b32d6" />
+                    <input
+                      type="text"
+                      value={profileForm.owner_name}
+                      onChange={(e) => setProfileForm({ ...profileForm, owner_name: e.target.value })}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="field-label">Phone Number</label>
+                  <div className="input-group">
+                    <Phone size={17} color="#5b32d6" />
+                    <input
+                      type="text"
+                      value={profileForm.phone}
+                      onChange={(e) => setProfileForm({ ...profileForm, phone: e.target.value })}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="field-label">GSTIN (Optional)</label>
+                  <div className="input-group">
+                    <FileText size={17} color="#5b32d6" />
+                    <input
+                      type="text"
+                      value={profileForm.gstin}
+                      onChange={(e) => setProfileForm({ ...profileForm, gstin: e.target.value })}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="field-label">Opening Cash (₹)</label>
+                  <div className="input-group">
+                    <IndianRupee size={17} color="#5b32d6" />
+                    <input
+                      type="number"
+                      step="any"
+                      value={profileForm.opening_cash}
+                      onChange={(e) => setProfileForm({ ...profileForm, opening_cash: e.target.value })}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="field-label">Low-Stock Alert Threshold</label>
+                  <div className="input-group">
+                    <Boxes size={17} color="#5b32d6" />
+                    <input
+                      type="number"
+                      min="1"
+                      value={profileForm.low_stock_threshold}
+                      onChange={(e) => setProfileForm({ ...profileForm, low_stock_threshold: e.target.value })}
+                    />
+                  </div>
+                </div>
               </div>
-              <form
-                onSubmit={handleAddExpense}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "1.5fr 1fr 1fr auto",
-                  gap: 12,
-                  marginBottom: 20,
-                }}
-              >
-                <input
-                  placeholder="Expense description (e.g., Electricity Bill)"
-                  value={expTitle}
-                  onChange={(e) => setExpTitle(e.target.value)}
-                  required
-                  style={{ padding: 11, borderRadius: 10, border: "1px solid #ddd" }}
-                />
-                <select
-                  value={expCategory}
-                  onChange={(e) => setExpCategory(e.target.value)}
-                  style={{ padding: 11, borderRadius: 10, border: "1px solid #ddd" }}
-                >
-                  <option value="Electricity">Electricity</option>
-                  <option value="Rent">Rent</option>
-                  <option value="Others">Others</option>
-                </select>
-                <input
-                  type="number"
-                  min="1"
-                  placeholder="Amount (₹)"
-                  value={expAmount}
-                  onChange={(e) => setExpAmount(e.target.value)}
-                  required
-                  style={{ padding: 11, borderRadius: 10, border: "1px solid #ddd" }}
-                />
-                <button type="submit" className="btn-primary" style={{ width: "auto" }}>
-                  Add Expense
-                </button>
-              </form>
 
-              <table>
-                <thead>
-                  <tr>
-                    <th>Expense</th>
-                    <th>Category</th>
-                    <th>Date</th>
-                    <th>Amount</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {transactions
-                    .filter((t) => t.tx_type === "expense")
-                    .map((e) => (
-                      <tr key={e.id}>
-                        <td>{e.title}</td>
-                        <td>{e.category}</td>
-                        <td>{e.tx_date}</td>
-                        <td style={{ color: "#dc2626", fontWeight: 700 }}>-₹{e.amount}</td>
-                      </tr>
-                    ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {/* 8. INVENTORY */}
-          {activeTab === "inventory" && (
-            <div className="card">
-              <div className="card-header">
-                <h3>Store Inventory</h3>
+              <label className="field-label">Shop Address</label>
+              <div className="input-group">
+                <MapPin size={17} color="#5b32d6" />
+                <input
+                  type="text"
+                  placeholder="Street, area, city, pincode"
+                  value={profileForm.address}
+                  onChange={(e) => setProfileForm({ ...profileForm, address: e.target.value })}
+                />
               </div>
-              <form
-                onSubmit={handleAddProduct}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "1.4fr 0.7fr 0.9fr 0.9fr auto",
-                  gap: 10,
-                  marginBottom: 20,
-                }}
-              >
-                <input
-                  placeholder="Product Name *"
-                  value={prodName}
-                  onChange={(e) => setProdName(e.target.value)}
-                  required
-                  style={{ padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
-                />
-                <input
-                  placeholder="Unit (kg/L/pcs)"
-                  value={prodUnit}
-                  onChange={(e) => setProdUnit(e.target.value)}
-                  style={{ padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
-                />
-                <input
-                  type="number"
-                  min="1"
-                  placeholder="Price (₹) *"
-                  value={prodPrice}
-                  onChange={(e) => setProdPrice(e.target.value)}
-                  required
-                  style={{ padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
-                />
-                <input
-                  type="number"
-                  min="0"
-                  placeholder="Stock Qty *"
-                  value={prodStock}
-                  onChange={(e) => setProdStock(e.target.value)}
-                  required
-                  style={{ padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
-                />
-                <button type="submit" className="btn-primary" style={{ width: "auto" }}>
-                  Add Item
-                </button>
-              </form>
 
-              {products.length === 0 ? (
-                <p style={{ color: "#6e678c", textAlign: "center", padding: 20 }}>
-                  No products in inventory yet. Add your store items above.
-                </p>
-              ) : (
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Product</th>
-                      <th>Unit Price</th>
-                      <th>Available Stock</th>
-                      <th>Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {products.map((p) => (
-                      <tr key={p.id}>
-                        <td>
-                          <strong>{p.name}</strong>
-                        </td>
-                        <td>
-                          ₹{p.price}/{p.unit}
-                        </td>
-                        <td>
-                          {p.stock} {p.unit}
-                        </td>
-                        <td>
-                          <span
-                            className={`badge ${
-                              p.stock <= 10 ? "badge-due" : "badge-cleared"
-                            }`}
-                          >
-                            {p.stock <= 10 ? "Low Stock" : "In Stock"}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
+              <button type="submit" className="btn-primary">Save Profile Changes</button>
+            </form>
           )}
 
-          {/* 9. SETTINGS */}
           {activeTab === "settings" && (
-            <div className="card" style={{ maxWidth: 540 }}>
+            <div className="card" style={{ maxWidth: 560 }}>
               <div className="card-header">
                 <h3>Store Settings</h3>
               </div>
-              <p style={{ marginBottom: 12 }}>
-                <strong>Store Name:</strong> {shop.shop_name}
-              </p>
-              <p style={{ marginBottom: 12 }}>
-                <strong>Owner:</strong> {shop.owner_name}
-              </p>
-              <p style={{ marginBottom: 20 }}>
-                <strong>Opening Cash Drawer:</strong> ₹{shop.opening_cash.toLocaleString("en-IN")}
+              <p style={{ fontSize: 14, color: "var(--text-muted)", marginBottom: 18 }}>
+                Manage your shop configuration or reset all transactions, customers, and inventory to start fresh.
               </p>
               <div style={{ display: "flex", gap: 12 }}>
-                <button className="btn-primary" style={{ width: "auto" }} onClick={handleToggleShop}>
-                  {shop.is_open ? "Close Shop for Today" : "Open Shop"}
+                <button type="button" className="btn-outline" onClick={() => setActiveTab("profile")}>
+                  Edit Shop Profile
                 </button>
-                <button className="btn-outline" onClick={handleResetStore}>
+                <button
+                  type="button"
+                  style={{ background: "#fef2f2", color: "#b91c1c", border: "1px solid #fecaca", padding: "10px 14px", borderRadius: 10, fontWeight: 700, cursor: "pointer" }}
+                  onClick={handleResetStore}
+                >
                   Reset All Store Data
                 </button>
               </div>
@@ -1509,63 +1604,38 @@ export default function App() {
         </main>
       </div>
 
-      {/* VOICE-TO-TRANSACTION MODAL */}
       {voiceModalOpen && (
         <div className="voice-modal-backdrop" onClick={() => setVoiceModalOpen(false)}>
           <div className="voice-modal" onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-              <h3 style={{ fontSize: 18, fontWeight: 800 }}>🎙️ Voice-to-Transaction</h3>
-              <button className="btn-outline" onClick={() => setVoiceModalOpen(false)}>
-                Close
-              </button>
-            </div>
-
-            <p style={{ fontSize: 13, color: "#6e678c", marginBottom: 16 }}>
-              Tap the mic and speak naturally in Indian English or Hinglish:
-              <br />
-              <em>"Sold 2 kg Rice for 120 UPI"</em>, <em>"Ramesh Credit 500"</em>, or <em>"Electricity bill expense 350 Cash"</em>.
-            </p>
-
-            <div style={{ textAlign: "center", marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <h3 style={{ fontSize: 18, fontWeight: 800 }}>🎤 Voice Transaction (Auto-Send)</h3>
               <button
-                className={`voice-bar-btn ${isListening ? "listening" : ""}`}
-                style={{ padding: "12px 22px", fontSize: 14 }}
-                onClick={() =>
-                  isListening ? stopSpeechRecognition() : startSpeechRecognition("modal")
-                }
+                type="button"
+                onClick={() => setVoiceModalOpen(false)}
+                style={{ background: "none", border: "none", fontSize: 18, cursor: "pointer" }}
               >
-                {isListening ? <MicOff size={18} /> : <Mic size={18} />}
-                <span>{isListening ? "Stop Listening" : "Tap to Speak"}</span>
+                ✕
               </button>
             </div>
-
+            <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 14 }}>
+              {voiceStatus || "Speak naturally — once you finish speaking, your entry is sent automatically."}
+            </p>
             <div className="input-group">
               <input
-                placeholder="Spoken text appears here (or type manually)..."
+                type="text"
+                placeholder="e.g., Sold 2 kg Rice for 120 Cash or Rahul Udhaar 250"
                 value={voiceTranscript}
                 onChange={(e) => setVoiceTranscript(e.target.value)}
               />
             </div>
-
-            <button className="btn-primary" onClick={handleProcessVoiceTransaction}>
-              Convert & Save Transaction ✓
-            </button>
-
-            {voiceStatus && (
-              <div
-                style={{
-                  marginTop: 14,
-                  padding: 12,
-                  borderRadius: 10,
-                  background: "#f4f2fc",
-                  fontSize: 13,
-                  fontWeight: 700,
-                  color: "#25195e",
-                }}
-              >
-                {voiceStatus}
-              </div>
-            )}
+            <div style={{ display: "flex", gap: 10 }}>
+              <button type="button" className="btn-outline" onClick={() => startSpeechRecognition("transaction")}>
+                <Mic size={16} /> {isListening ? "Listening..." : "Speak Again"}
+              </button>
+              <button type="button" className="btn-primary" onClick={() => submitVoiceText(voiceTranscript, "transaction")}>
+                Send Now
+              </button>
+            </div>
           </div>
         </div>
       )}

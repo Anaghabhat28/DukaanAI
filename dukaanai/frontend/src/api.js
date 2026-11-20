@@ -16,6 +16,8 @@ export const api = {
   getShop: () => request("/shop"),
   setupShop: (data) =>
     request("/shop/setup", { method: "POST", body: JSON.stringify(data) }),
+  updateProfile: (data) =>
+    request("/shop/profile", { method: "POST", body: JSON.stringify(data) }),
   resetShop: () => request("/shop/reset", { method: "POST" }),
   toggleShop: () => request("/shop/toggle", { method: "POST" }),
   getDashboard: () => request("/dashboard"),
