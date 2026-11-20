@@ -2,29 +2,37 @@
 
 DukaanAI is an AI-powered digital business management platform designed to help small shop owners manage their daily business activities more efficiently.
 
-It brings essential business operations such as sales tracking, inventory management, customer records, expense tracking, and AI-powered financial assistance into one platform.
+It brings essential business operations such as sales tracking, inventory management, customer records, expense tracking, financial reporting, and AI-powered assistance into one platform.
+
+The platform combines digital record-keeping with voice-based interaction and intelligent financial insights to make everyday shop management easier and more accessible.
 
 ## ✨ Features
 
-- **Dashboard:** View important business information and daily performance.
-- **Sales Management:** Record and monitor daily sales.
-- **Inventory Management:** Manage product details and stock information.
-- **Customer Management:** Maintain customer records and track credit (Udhaar).
-- **Expense Tracking:** Record and monitor business expenses.
-- **Financial Reports:** Understand sales, expenses, and profit.
-- **AI Business Assistant:** Ask business-related questions and receive intelligent responses using Google Gemini.
-- **Voice-Based Input:** Make business operations easier through voice-based interaction.
+- **User-Driven Store Setup:** Shopkeepers can enter their own store name, owner name, and opening cash drawer balance.
+- **Dashboard:** View important business information and daily financial performance.
+- **Sales Management:** Record and monitor daily sales through manual entry and inventory-based sales.
+- **Voice-to-Transaction Conversion:** Convert spoken sales, Udhaar/credit entries, and expenses into transaction records using the browser Web Speech API (`en-IN`) and Google Gemini.
+- **Inventory Management:** Manage products, product details, stock quantities, and inventory information.
+- **Customer Management:** Maintain customer records and track credit transactions through the Udhaar Book.
+- **Expense Tracking:** Record and monitor daily business expenses.
+- **Live Financial Calculations:** View Today's Sales, Cash & UPI Received, Udhaar Pending, Cash Drawer Balance, and Net Profit.
+- **Cash-Flow Forecast:** View a 7-day cash-flow forecast to understand expected financial activity.
+- **Financial Reports:** Analyze sales, expenses, and business performance.
+- **Data Visualization:** Interactive financial charts and dashboard visualizations using Recharts.
+- **DukaanAI Assistant:** Get AI-powered answers and useful business insights based on available shop data.
 
 ## 🤖 AI Integration
 
-DukaanAI uses **Google Gemini 2.5 Flash** to provide intelligent business assistance.
+DukaanAI integrates **Google Gemini 2.5 Flash** to provide intelligent business assistance.
 
 The AI assistant can:
+
 - Answer financial and business-related questions.
 - Analyze available shop data.
-- Provide useful insights based on sales, expenses, customers, and products.
+- Provide insights based on sales, expenses, customers, and products.
+- Convert voice-based business entries into structured transaction information.
 
-**AI Model:** Gemini 2.5 Flash  
+**AI Model:** Gemini 2.5 Flash (`gemini-2.5-flash`)  
 **API:** Google Gemini API  
 **Python SDK:** `google-genai`
 
@@ -33,9 +41,11 @@ The AI assistant can:
 | Component | Technology |
 |---|---|
 | Frontend | React.js, Vite, JavaScript, CSS |
+| Data Visualization | Recharts |
 | Backend | Python, FastAPI |
 | Database | SQLite |
 | AI Integration | Google Gemini 2.5 Flash |
+| Voice Input | Browser Web Speech API |
 | API Communication | REST API |
 | Development Tools | VS Code, Git, GitHub |
 
@@ -48,47 +58,64 @@ DukaanAI/
 ├── .gitignore
 │
 └── dukaanai/
+    │
     ├── backend/
     │   ├── main.py
     │   ├── requirements.txt
-    │   └── .env.example
+    │   ├── .env.example
+    │   └── ...
     │
     └── frontend/
         ├── src/
+        │   ├── App.jsx
+        │   ├── api.js
+        │   ├── index.css
+        │   └── ...
         ├── public/
         ├── package.json
+        ├── package-lock.json
         └── index.html
 ```
 
 ## 🚀 How to Run the Project
 
+### Prerequisites
+
+- Python 3.10 or above
+- Node.js and npm
+- Google Gemini API key ([Get your API key from Google AI Studio](https://aistudio.google.com/))
+- Git
+
 ### 1. Clone the Repository
 
-```bash
+Open PowerShell:
+
+```powershell
 git clone https://github.com/Anaghabhat28/DukaanAI.git
 cd DukaanAI
 ```
 
 ### 2. Set Up the Backend
 
-```bash
-cd dukaanai/backend
-```
+Open Terminal 1 (PowerShell):
 
-Create and activate a virtual environment:
+```powershell
+cd dukaanai\backend
 
-```bash
 python -m venv .venv
+
 .venv\Scripts\activate
-```
 
-Install the required dependencies:
-
-```bash
 pip install -r requirements.txt
 ```
 
-Create a `.env` file inside the backend folder and add your Gemini API key:
+Create a `.env` file from `.env.example` if it does not already exist:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Open the `.env` file and add your Gemini API key:
 
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
@@ -96,49 +123,43 @@ GEMINI_API_KEY=your_gemini_api_key_here
 
 Start the backend server:
 
-```bash
+```powershell
 uvicorn main:app --reload --port 8000
 ```
 
-Backend API documentation:
+**Backend URL:** `http://127.0.0.1:8000`
 
-`http://127.0.0.1:8000/docs`
+**API Documentation:** `http://127.0.0.1:8000/docs`
 
 ### 3. Set Up the Frontend
 
-Open another terminal:
+Open a second terminal (PowerShell):
 
-```bash
-cd dukaanai/frontend
-```
+```powershell
+cd dukaanai\frontend
 
-Install dependencies:
-
-```bash
 npm install
-```
 
-Start the frontend:
-
-```bash
 npm run dev
 ```
 
-Open the application:
+Open the URL displayed in the terminal (usually `http://localhost:5173`) in Chrome or Edge.
 
-`http://localhost:5173`
+**Note:** `npm install` automatically installs all frontend dependencies listed in `package.json`, including Recharts. You do not need to install Recharts separately.
 
 ## 🔐 Environment Variables
 
-The project uses environment variables to protect sensitive information.
+The backend uses environment variables to protect sensitive information.
 
-Create a `.env` file in the backend folder:
+Create a `.env` file inside the `dukaanai/backend/` directory and add:
 
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
 ```
 
-Never upload your actual API key or `.env` file to GitHub.
+- Never upload your actual `.env` file or expose your Gemini API key.
+- Keep your `.env.example` file for other developers to understand the required configuration.
+- Ensure `.env` is included in `.gitignore`.
 
 ## 🎯 Project Objective
 
@@ -148,7 +169,7 @@ It aims to make everyday business operations easier, more organized, and more ac
 
 ## 👥 Team Members
 
-**This project is collaboratively developed by:**
+This project is collaboratively developed by:
 
 1. **J. Anagha Bhat**  
    GitHub: [@Anaghabhat28](https://github.com/Anaghabhat28)
