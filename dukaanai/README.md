@@ -22,7 +22,7 @@
 
 - Python 3.10+
 - Node.js and npm
-- Google Gemini API key
+- Google Gemini API key ([Get one from Google AI Studio](https://aistudio.google.com/))
 
 ### 1. Backend (Python FastAPI + SQLite + Gemini API)
 
@@ -30,16 +30,18 @@ Open Terminal 1 (PowerShell):
 
 ```powershell
 cd dukaanai\backend
-
 python -m venv .venv
 .venv\Scripts\activate
-
 pip install -r requirements.txt
+```
 
+Create `.env` from `.env.example` only if it does not already exist:
+
+```powershell
 Copy-Item .env.example .env
 ```
 
-Open the newly created `.env` file and add your Gemini API key:
+Add your Gemini API key to the `.env` file:
 
 ```env
 GEMINI_API_KEY=your_actual_api_key
@@ -59,9 +61,7 @@ Open a **second terminal** (PowerShell):
 
 ```powershell
 cd dukaanai\frontend
-
 npm install
-
 npm run dev
 ```
 
