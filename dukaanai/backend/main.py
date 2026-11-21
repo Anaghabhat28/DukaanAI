@@ -1,4 +1,5 @@
 import os
+import math
 import re
 import json
 import uuid
@@ -48,7 +49,6 @@ def verify_password(password: str, salt: str, password_hash: str) -> bool:
 
 
 def ensure_columns(cur):
-    # Users table
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,7 +69,6 @@ def ensure_columns(cur):
     )
     """)
 
-    # Shops table (per user)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS shops (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,7 +85,6 @@ def ensure_columns(cur):
     )
     """)
 
-    # Products migrations
     prod_cols = {row["name"] for row in cur.execute("PRAGMA table_info(products)").fetchall()}
     if "user_id" not in prod_cols:
         cur.execute("ALTER TABLE products ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
@@ -95,12 +93,10 @@ def ensure_columns(cur):
     if "low_stock_threshold" not in prod_cols:
         cur.execute("ALTER TABLE products ADD COLUMN low_stock_threshold INTEGER NOT NULL DEFAULT 5")
 
-    # Customers migrations
     cust_cols = {row["name"] for row in cur.execute("PRAGMA table_info(customers)").fetchall()}
     if "user_id" not in cust_cols:
         cur.execute("ALTER TABLE customers ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
 
-    # Transactions migrations
     tx_cols = {row["name"] for row in cur.execute("PRAGMA table_info(transactions)").fetchall()}
     if "user_id" not in tx_cols:
         cur.execute("ALTER TABLE transactions ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1")
@@ -311,6 +307,7 @@ class StockDeltaRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    history: Optional[list[dict]] = None
 
 
 class VoiceTransactionRequest(BaseModel):
@@ -473,10 +470,29 @@ def _find_matching_product(products: list, candidate_name: str):
     return None
 
 
+def _extract_explicit_total_amount(lower_text: str) -> Optional[float]:
+    """Extract an explicitly stated total rupee/currency amount without defaulting to any fixed number."""
+    patterns = [
+        r"(?:for|total|amount\s*(?:is|of)?|worth|cost(?:ing)?)\s*(?:₹|rs\.?|rupees?|rupai|rupaye|ரூபாய்|రూపాయలు|ರೂಪಾಯಿ)?\s*(\d+(?:\.\d+)?)",
+        r"(?:₹|rs\.?|rupees?|rupai|rupaye|ரூபாய்|రూపాయలు|ರೂಪಾಯಿ)\s*(\d+(?:\.\d+)?)",
+        r"(\d+(?:\.\d+)?)\s*(?:₹|rs\.?|rupees?|rupai|rupaye|ரூபாய்|రూపాయలు|ರೂಪಾಯಿ)\b",
+    ]
+    for pat in patterns:
+        m = re.search(pat, lower_text, flags=re.IGNORECASE)
+        if m:
+            val = float(m.group(1))
+            if math.isfinite(val) and val > 0:
+                return round(val, 2)
+    return None
+
+
 def parse_voice_with_fallback(transcript: str, products: list, customers: list, language: str = "en-IN") -> dict:
     client = get_gemini_client()
     product_names = [f"{p['name']} (selling ₹{p['price']}/{p['unit']}, stock: {p['stock']} {p['unit']})" for p in products]
     customer_names = [c["name"] for c in customers]
+    text = transcript.strip()
+    lower = text.lower()
+    explicit_total = _extract_explicit_total_amount(lower)
 
     if client:
         prompt = f"""
@@ -490,7 +506,7 @@ def parse_voice_with_fallback(transcript: str, products: list, customers: list, 
 
         Determine the intent carefully:
         1. "add_inventory": Adding/restocking products into inventory (e.g., "Add 10 kg of rice at ₹60 per kg", "Add 20 packets of biscuits at ₹10 each", "Add 5 bottles of oil", or regional equivalents like "10 kg akki add madi 60 rupees", "10 kilo chawal 60 rupaye ke hisab se add karo").
-        2. "sale": Recording a sale (e.g., "Sold 2 kg of rice for ₹120", "Record 3 biscuit packets paid through UPI", "Sold 2 oil bottles on credit to Ramesh", or regional equivalents).
+        2. "sale": Recording a sale (e.g., "I sold rice for 120 rupees", "Sold 2 kg of rice for ₹120", "Record 3 biscuit packets paid through UPI", "Sold 2 oil bottles on credit to Ramesh", or regional equivalents).
         3. "credit_payment": Customer paying back Udhaar/credit.
         4. "expense": Recording shop expense (rent, electricity, transport, etc.).
 
@@ -509,8 +525,10 @@ def parse_voice_with_fallback(transcript: str, products: list, customers: list, 
         }}
 
         Rules:
+        - NEVER invent or default an amount to 50 or any arbitrary number. If no price or amount is mentioned and no unit price applies, set amount to 0.
+        - When a total transaction price is stated (e.g. "I sold rice for 120 rupees", "for ₹75", "1500 rupees"), set "amount" to that exact number.
         - For "add_inventory": if price is "at ₹60 per kg" or "at ₹10 each", unit_price is 60 or 10, and amount is quantity * unit_price. If no price is stated (e.g., "Add 5 bottles of oil"), set unit_price to existing product price if matched else 0, and amount = quantity * unit_price.
-        - For "sale": if total price is given ("Sold 2 kg of rice for ₹120"), amount is 120 and unit_price is 60. If only quantity is given ("Record 3 biscuit packets paid through UPI"), look up the product's selling price in Available inventory products to compute unit_price and amount = quantity * unit_price.
+        - For "sale": if total price is given ("Sold 2 kg of rice for ₹120"), amount is 120. If only quantity is given ("Record 3 biscuit packets paid through UPI"), look up the product's selling price in Available inventory products to compute unit_price and amount = quantity * unit_price.
         - Normalize product_name cleanly (e.g. "rice" -> "Rice" or matched inventory name, "biscuit packets" -> "Biscuits" if "Biscuits" is in inventory).
         """
         try:
@@ -526,9 +544,12 @@ def parse_voice_with_fallback(transcript: str, products: list, customers: list, 
                 action = "add_inventory"
             data["action_type"] = action
             data["unit"] = _normalize_unit(data.get("unit"))
-            qty = float(data.get("quantity") or 1)
-            u_price = float(data.get("unit_price") or 0)
-            amt = float(data.get("amount") or 0)
+            qty_raw = float(data.get("quantity") or 1)
+            qty = qty_raw if math.isfinite(qty_raw) and qty_raw > 0 else 1.0
+            u_price_raw = float(data.get("unit_price") or 0)
+            u_price = u_price_raw if math.isfinite(u_price_raw) and u_price_raw >= 0 else 0.0
+            amt_raw = float(data.get("amount") or 0)
+            amt = amt_raw if math.isfinite(amt_raw) and amt_raw >= 0 else 0.0
 
             matched_prod = _find_matching_product(products, data.get("product_name") or "")
             if matched_prod:
@@ -536,30 +557,28 @@ def parse_voice_with_fallback(transcript: str, products: list, customers: list, 
                 data["product_name"] = matched_prod["name"]
                 if not data.get("unit") or data["unit"] == "unit":
                     data["unit"] = matched_prod["unit"]
-                if action == "sale" and u_price <= 0 and amt <= 0:
-                    u_price = float(matched_prod["price"])
-                    amt = round(qty * u_price, 2)
-                elif action == "add_inventory" and u_price <= 0 and amt <= 0:
-                    u_price = float(matched_prod["price"])
-                    amt = round(qty * u_price, 2)
+                if explicit_total is None and u_price <= 0 and amt <= 0:
+                    prod_price = float(matched_prod.get("price") or 0)
+                    if prod_price > 0:
+                        u_price = prod_price
+                        amt = round(qty * u_price, 2)
 
-            if amt <= 0 and u_price > 0:
+            if explicit_total is not None:
+                amt = explicit_total
+                if qty > 0 and u_price <= 0:
+                    u_price = round(amt / qty, 2)
+            elif amt <= 0 and u_price > 0:
                 amt = round(qty * u_price, 2)
-            if u_price <= 0 and amt > 0 and qty > 0:
+            elif u_price <= 0 and amt > 0 and qty > 0:
                 u_price = round(amt / qty, 2)
 
             data["quantity"] = qty
-            data["unit_price"] = u_price
-            data["amount"] = amt
+            data["unit_price"] = round(u_price, 2)
+            data["amount"] = round(amt, 2)
             return data
         except Exception:
             pass
 
-    # --- Deterministic Multilingual & Code-Mixed Fallback Parser ---
-    text = transcript.strip()
-    lower = text.lower()
-
-    # Multilingual keyword mappings for common items & verbs
     regional_item_aliases = {
         "chawal": "Rice", "चावल": "Rice", "akki": "Rice", "ಅಕ್ಕಿ": "Rice", "arisi": "Rice", "அரிசி": "Rice", "biyyam": "Rice", "బియ్యం": "Rice",
         "biscuit": "Biscuits", "biscuits": "Biscuits", "बिस्किट": "Biscuits", "ಬಿಸ್ಕೆಟ್": "Biscuits", "பிஸ்கட்": "Biscuits", "బిస్కెట్": "Biscuits",
@@ -569,7 +588,6 @@ def parse_voice_with_fallback(transcript: str, products: list, customers: list, 
         "dal": "Dal", "दाल": "Dal", "bele": "Dal", "ಬೇಳೆ": "Dal", "paruppu": "Dal", "பருப்பு": "Dal", "pappu": "Dal", "పప్పు": "Dal",
     }
 
-    # Payment method detection (EN + HI + KN + TA + TE)
     if any(w in lower for w in ["upi", "gpay", "phonepe", "paytm", "online", "यूपीआई", "ಯುಪಿಐ", "யுபிஐ", "యూపీఐ"]):
         pay_method = "UPI"
     elif any(w in lower for w in ["credit", "udhaar", "udhar", "khata", "उधार", "ಸಾಲ", "கடன்", "అప్పు"]):
@@ -577,29 +595,20 @@ def parse_voice_with_fallback(transcript: str, products: list, customers: list, 
     else:
         pay_method = "Cash"
 
-    # Extract quantity + unit
     unit_pattern = r"(\d+(?:\.\d+)?)\s*(kg|kgs|kilo|kilos|kilogram|g|gm|gram|grams|l|ltr|litre|litres|liter|ml|packet|packets|pkt|bottle|bottles|pc|pcs|piece|pieces|box|boxes|bag|bags|dozen|unit|units|किलो|लीटर|पैकेट|बोतल|ಕೆಜಿ|ಲೀಟರ್|ಪ್ಯಾಕೆಟ್|ಬಾಟಲ್|கிலோ|லிட்டர்|பாக்கெட்|பாட்டில்|కిలో|లీటర్|ప్యాకెట్|బాటిల్)\b"
     qty_match = re.search(unit_pattern, lower)
     qty = float(qty_match.group(1)) if qty_match else 1.0
     unit = _normalize_unit(qty_match.group(2)) if qty_match else "unit"
 
-    # Extract explicit price (per unit vs total)
     per_unit_match = re.search(r"(?:at|@|per|each|rate|ke hisab se|ge|ku|ki)\s*(?:₹|rs\.?|rupees)?\s*(\d+(?:\.\d+)?)\s*(?:per\s*\w+|each|rupees|rs)?", lower)
-    total_price_match = re.search(r"(?:for|total|₹|rs\.?|rupees|rupai|rupaye|ரூபாய்|రూపాయలు|ರೂಪಾಯಿ)\s*(\d+(?:\.\d+)?)", lower)
     all_nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", lower)]
 
-    # Detect intent: add_inventory vs expense vs credit_payment vs sale
     add_inv_triggers = [
         "add ", "stock ", "restock", "purchase", "bought", "new item", "inventory",
         "जोड़ो", "ऐड", "स्टॉक", "ಸೇರಿಸಿ", "ಆಡ್", "சேர்", "ஆட்", "జోడించు", "యాడ్",
     ]
-    sold_triggers = [
-        "sold", "sell", "record ", "sale", "becha", "बेचा", "ಮಾರಾಟ", "ವಿಕ್ರಯ", "விற்றேன்", "అమ్మాను",
-    ]
-
     is_add_inventory = any(t in lower for t in add_inv_triggers) and not any(s in lower for s in ["sold", "becha", "बेचा", "விற்றேன்", "అమ్మాను"])
 
-    # Match product from existing inventory or regional aliases or phrase extraction
     matched_prod = None
     for p in products:
         if p["name"].lower() in lower:
@@ -615,7 +624,6 @@ def parse_voice_with_fallback(transcript: str, products: list, customers: list, 
 
     extracted_prod_name = matched_prod["name"] if matched_prod else None
     if not extracted_prod_name:
-        # Try extracting product name after quantity+unit or after "of"
         of_match = re.search(
             r"(?:of|packets of|bottles of|kg of|kilo of)\s+([a-zA-Z\u0900-\u0D7F][a-zA-Z\u0900-\u0D7F\s]{1,28}?)(?:\s+(?:at|for|on|paid|via|through|to|@|₹|rs|\d)|$)",
             text,
@@ -633,7 +641,6 @@ def parse_voice_with_fallback(transcript: str, products: list, customers: list, 
     if matched_prod and unit == "unit" and matched_prod.get("unit"):
         unit = matched_prod["unit"]
 
-    # Match customer name
     matched_cust = None
     for c in customers:
         if c["name"].lower() in lower:
@@ -650,51 +657,50 @@ def parse_voice_with_fallback(transcript: str, products: list, customers: list, 
             if cand_c.lower() not in {"cash", "upi", "credit", "udhaar", "udhar", "inventory", "stock"}:
                 matched_cust = cand_c.title()
 
-    # Expense branch
     if any(w in lower for w in ["expense", "electricity", "rent", "transport", "salary", "repair", "spent", "बिजली", "किराया", "ಖರ್ಚು", "செலவு", "ఖర్చు"]):
-        amt = float(total_price_match.group(1)) if total_price_match else (all_nums[-1] if all_nums else 0.0)
+        amt = explicit_total if explicit_total is not None else (all_nums[-1] if all_nums else 0.0)
         cat = "Electricity" if "electricity" in lower or "power" in lower else ("Rent" if "rent" in lower else "Others")
         return {
             "action_type": "expense",
             "product_name": None,
             "quantity": 1,
             "unit": "unit",
-            "unit_price": amt,
-            "amount": amt,
+            "unit_price": round(float(amt), 2),
+            "amount": round(float(amt), 2),
             "payment_method": pay_method if pay_method != "Credit" else "Cash",
             "customer_name": None,
             "category": cat,
             "title": text.capitalize(),
         }
 
-    # Udhaar recovery branch
     if any(w in lower for w in ["received from", "settled", "cleared", "paid back", "udhaar paid", "udhar paid"]):
-        amt = float(total_price_match.group(1)) if total_price_match else (all_nums[-1] if all_nums else 0.0)
+        amt = explicit_total if explicit_total is not None else (all_nums[-1] if all_nums else 0.0)
         return {
             "action_type": "credit_payment",
             "product_name": None,
             "quantity": 1,
             "unit": "unit",
-            "unit_price": amt,
-            "amount": amt,
+            "unit_price": round(float(amt), 2),
+            "amount": round(float(amt), 2),
             "payment_method": pay_method if pay_method != "Credit" else "Cash",
             "customer_name": matched_cust,
             "category": "Udhaar Recovery",
             "title": f"{matched_cust or 'Customer'} - Udhaar Paid",
         }
 
-    # Add Inventory branch
     if is_add_inventory:
         unit_price = 0.0
+        total_amount = 0.0
         if per_unit_match:
             unit_price = float(per_unit_match.group(1))
-        elif total_price_match:
-            total_val = float(total_price_match.group(1))
-            unit_price = round(total_val / qty, 2) if qty > 0 else total_val
+            total_amount = round(qty * unit_price, 2)
+        elif explicit_total is not None:
+            total_amount = explicit_total
+            unit_price = round(total_amount / qty, 2) if qty > 0 else total_amount
         elif matched_prod and float(matched_prod.get("price") or 0) > 0:
             unit_price = float(matched_prod["price"])
+            total_amount = round(qty * unit_price, 2)
 
-        total_amount = round(qty * unit_price, 2)
         prod_label = extracted_prod_name or "New Item"
         return {
             "action_type": "add_inventory",
@@ -710,17 +716,16 @@ def parse_voice_with_fallback(transcript: str, products: list, customers: list, 
             "title": f"Add {qty:g} {unit} {prod_label}" + (f" @ ₹{unit_price:g}/{unit}" if unit_price > 0 else ""),
         }
 
-    # Sale branch (default)
     prod_label = extracted_prod_name or "Counter Sale"
     unit_price = 0.0
     total_amount = 0.0
 
-    if per_unit_match:
+    if explicit_total is not None:
+        total_amount = explicit_total
+        unit_price = round(total_amount / qty, 2) if qty > 0 else total_amount
+    elif per_unit_match:
         unit_price = float(per_unit_match.group(1))
         total_amount = round(qty * unit_price, 2)
-    elif total_price_match:
-        total_amount = float(total_price_match.group(1))
-        unit_price = round(total_amount / qty, 2) if qty > 0 else total_amount
     elif matched_prod and float(matched_prod.get("price") or 0) > 0:
         unit_price = float(matched_prod["price"])
         total_amount = round(qty * unit_price, 2)
@@ -743,8 +748,8 @@ def parse_voice_with_fallback(transcript: str, products: list, customers: list, 
         "product_name": prod_label,
         "quantity": qty,
         "unit": unit,
-        "unit_price": unit_price,
-        "amount": total_amount,
+        "unit_price": round(unit_price, 2),
+        "amount": round(total_amount, 2),
         "payment_method": pay_method,
         "customer_name": matched_cust,
         "category": "Groceries",
@@ -766,7 +771,7 @@ def execute_parsed_action(parsed: dict, user_id: int) -> dict:
         unit = _normalize_unit(parsed.get("unit") or "unit")
         unit_price = float(parsed.get("unit_price") or 0)
 
-        if not prod_name or qty <= 0:
+        if not prod_name or qty <= 0 or not math.isfinite(qty):
             conn.close()
             raise HTTPException(status_code=400, detail="Product name and positive quantity are required to add inventory.")
 
@@ -799,11 +804,17 @@ def execute_parsed_action(parsed: dict, user_id: int) -> dict:
         parsed["result_message"] = result_msg
         return parsed
 
-    amount = float(parsed.get("amount") or 0)
-    if amount <= 0:
-        conn.close()
-        raise HTTPException(status_code=400, detail="Could not determine a valid ₹ amount. Please review and enter the price before confirming.")
+    raw_amount = parsed.get("amount")
+    try:
+        amount = round(float(raw_amount), 2)
+    except (TypeError, ValueError):
+        amount = 0.0
 
+    if not math.isfinite(amount) or amount <= 0:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Could not determine a valid ₹ amount. Please review and enter a valid amount above ₹0 before confirming.")
+
+    parsed["amount"] = amount
     pay_method = parsed.get("payment_method", "Cash")
     cust_name = parsed.get("customer_name")
     prod_name = parsed.get("product_name")
@@ -856,7 +867,7 @@ def execute_parsed_action(parsed: dict, user_id: int) -> dict:
                VALUES (?, 'sale', ?, ?, ?, ?, ?, ?, ?)""",
             (user_id, parsed.get("title", "Voice Sale"), parsed.get("category", "Groceries"), pay_method, amount, customer_id, tx_date, tx_time),
         )
-        parsed["result_message"] = f"Recorded {pay_method} sale: {parsed.get('title', 'Sale')} for ₹{amount:,.0f}"
+        parsed["result_message"] = f"Recorded {pay_method} sale: {parsed.get('title', 'Sale')} for ₹{amount:,.2f}".rstrip("0").rstrip(".")
 
     elif action_type == "credit_payment":
         if not customer_id:
@@ -1470,19 +1481,84 @@ def voice_to_transaction(payload: VoiceTransactionRequest, user: dict = Depends(
 
 
 # --- DukaanAI Assistant ---
+def _compute_product_sales_stats(products: list, transactions: list) -> list:
+    stats = {}
+    for p in products:
+        stats[p["name"].lower()] = {
+            "product_name": p["name"],
+            "unit": p.get("unit") or "unit",
+            "current_stock": float(p.get("stock") or 0),
+            "unit_price": float(p.get("price") or 0),
+            "revenue": 0.0,
+            "quantity_sold": 0.0,
+            "sale_count": 0,
+        }
+    for tx in transactions:
+        if tx.get("tx_type") != "sale":
+            continue
+        title_l = (tx.get("title") or "").lower()
+        amt = float(tx.get("amount") or 0)
+        matched_key = None
+        for pname_l in stats:
+            if pname_l and pname_l in title_l:
+                matched_key = pname_l
+                break
+        if matched_key:
+            item = stats[matched_key]
+            item["revenue"] = round(item["revenue"] + amt, 2)
+            item["sale_count"] += 1
+            qty_m = re.search(r"\((\d+(?:\.\d+)?)\s+", title_l) or re.search(r"\bx(\d+(?:\.\d+)?)", title_l)
+            if qty_m:
+                item["quantity_sold"] = round(item["quantity_sold"] + float(qty_m.group(1)), 2)
+            elif item["unit_price"] > 0:
+                item["quantity_sold"] = round(item["quantity_sold"] + (amt / item["unit_price"]), 2)
+    return [v for v in stats.values() if v["revenue"] > 0 or v["sale_count"] > 0]
+
+
 def build_comprehensive_assistant_reply(
-    msg: str, shop: dict, sales_today: float, exp_today: float, all_sales: float, all_exp: float,
-    cash_balance: float, customers: list, products: list, recent_tx: list
+    msg: str,
+    shop: dict,
+    sales_today: float,
+    exp_today: float,
+    month_sales: float,
+    month_exp: float,
+    last_month_sales: float,
+    all_sales: float,
+    all_exp: float,
+    cash_balance: float,
+    customers: list,
+    products: list,
+    recent_tx: list,
+    product_stats: list,
 ) -> str:
     lower = msg.lower().strip()
     owner = shop.get("owner_name") or "Shopkeeper"
     store = shop.get("shop_name") or "your store"
+    default_thresh = int(shop.get("low_stock_threshold") or 5)
+
+    pending_customers = sorted(
+        [
+            {**c, "balance": max(0.0, float(c.get("total_credit") or 0) - float(c.get("paid") or 0))}
+            for c in customers
+            if (float(c.get("total_credit") or 0) - float(c.get("paid") or 0)) > 0
+        ],
+        key=lambda x: x["balance"],
+        reverse=True,
+    )
+    total_pending_udhaar = sum(c["balance"] for c in pending_customers)
+
+    out_items = [p for p in products if float(p.get("stock") or 0) <= 0]
+    low_items = [
+        p
+        for p in products
+        if 0 < float(p.get("stock") or 0) <= int(p.get("low_stock_threshold") or default_thresh)
+    ]
 
     if any(w in lower for w in ["hello", "hi", "hey", "namaste", "good morning", "good evening"]):
         return (
             f"Namaste {owner}! Welcome to {store}'s assistant. "
-            f"Today's sales stand at ₹{sales_today:,.0f}, expenses at ₹{exp_today:,.0f}, and cash in hand is ₹{cash_balance:,.0f}. "
-            f"Ask me anything about sales, profit, Udhaar, inventory, expenses, cash flow, or retail tips!"
+            f"Today's sales are ₹{sales_today:,.0f}, expenses are ₹{exp_today:,.0f}, and this month's sales are ₹{month_sales:,.0f}. "
+            f"Ask me about sales, profit, expenses, inventory, Udhaar, or business tips!"
         )
 
     matched_cust = None
@@ -1491,85 +1567,117 @@ def build_comprehensive_assistant_reply(
             matched_cust = c
             break
 
-    if matched_cust and any(w in lower for w in ["udhaar", "udhar", "balance", "due", "pending", "credit", "owe", "paid", "khata"]):
-        bal = max(0.0, matched_cust["total_credit"] - matched_cust["paid"])
+    if matched_cust:
+        bal = max(0.0, float(matched_cust.get("total_credit") or 0) - float(matched_cust.get("paid") or 0))
         return (
             f"{matched_cust['name']} has a pending Udhaar balance of ₹{bal:,.0f} "
-            f"(Total Credit: ₹{matched_cust['total_credit']:,.0f}, Paid: ₹{matched_cust['paid']:,.0f}, Due Date: {matched_cust['due_date'] or 'N/A'})."
+            f"(Total Credit: ₹{float(matched_cust.get('total_credit') or 0):,.0f}, "
+            f"Paid: ₹{float(matched_cust.get('paid') or 0):,.0f}, Due Date: {matched_cust.get('due_date') or 'N/A'})."
         )
 
-    if any(w in lower for w in ["pending", "udhaar", "udhar", "credit", "khata", "due"]):
-        pending_list = [c for c in customers if (c["total_credit"] - c["paid"]) > 0]
-        if not pending_list:
-            return "No pending Udhaar balances right now — all customers are settled!"
-        total_u = sum(c["total_credit"] - c["paid"] for c in pending_list)
-        details = ", ".join([f"{c['name']}: ₹{c['total_credit'] - c['paid']:,.0f} (due {c['due_date'] or 'soon'})" for c in pending_list])
-        return f"Total pending Udhaar across {len(pending_list)} customer(s) is ₹{total_u:,.0f} — {details}."
+    if any(w in lower for w in ["owe", "owes", "most money", "highest udhaar", "top debtor", "unpaid", "not paid", "pending", "udhaar", "udhar", "credit", "khata", "due"]):
+        if not customers:
+            return "No customer records are available in your Udhaar ledger yet."
+        if not pending_customers:
+            return "No pending Udhaar balances right now — all recorded customers have cleared their dues."
+        top_c = pending_customers[0]
+        names_str = ", ".join([f"{c['name']} (₹{c['balance']:,.0f})" for c in pending_customers])
+        if any(w in lower for w in ["owe", "owes", "most", "highest", "top"]):
+            return (
+                f"{top_c['name']} owes the most with ₹{top_c['balance']:,.0f} pending. "
+                f"Total pending Udhaar across {len(pending_customers)} customer(s) is ₹{total_pending_udhaar:,.0f} ({names_str})."
+            )
+        return f"Total pending Udhaar across {len(pending_customers)} customer(s) is ₹{total_pending_udhaar:,.0f}: {names_str}."
 
-    if any(w in lower for w in ["profit", "margin", "earning", "kamai"]):
+    if any(w in lower for w in ["compare", "last month", "previous month", "month over month", "mom"]):
+        diff = month_sales - last_month_sales
+        direction = "higher" if diff >= 0 else "lower"
+        return (
+            f"This month's sales are ₹{month_sales:,.0f} compared to last month's sales of ₹{last_month_sales:,.0f} "
+            f"(₹{abs(diff):,.0f} {direction} than last month)."
+        )
+
+    if any(w in lower for w in ["profit", "margin", "kamai"]) or ("earn" in lower and "month" not in lower):
+        if any(w in lower for w in ["month", "monthly", "this month"]):
+            m_profit = month_sales - month_exp
+            return (
+                f"This month's net profit is ₹{m_profit:,.0f} "
+                f"(Monthly Sales: ₹{month_sales:,.0f} − Monthly Expenses: ₹{month_exp:,.0f})."
+            )
         today_profit = sales_today - exp_today
         overall_profit = all_sales - all_exp
-        margin = (today_profit / sales_today * 100) if sales_today > 0 else 0
         return (
-            f"Today's net profit is ₹{today_profit:,.0f} (Sales ₹{sales_today:,.0f} − Expenses ₹{exp_today:,.0f}, {margin:.1f}% margin). "
-            f"Overall cumulative net (Sales − Expenses) is ₹{overall_profit:,.0f}."
+            f"Today's profit is ₹{today_profit:,.0f} (Sales ₹{sales_today:,.0f} − Expenses ₹{exp_today:,.0f}). "
+            f"This month's net is ₹{month_sales - month_exp:,.0f}, and overall cumulative net is ₹{overall_profit:,.0f}."
         )
 
-    if any(w in lower for w in ["cash", "balance", "galla", "drawer", "hand"]):
+    if any(w in lower for w in ["highest-selling", "highest selling", "best selling", "top selling", "most revenue", "most sold", "generated the most"]):
+        if not product_stats:
+            return "There is no product-level sale history recorded yet to determine highest-selling or top-revenue products."
+        by_rev = sorted(product_stats, key=lambda x: x["revenue"], reverse=True)
+        by_qty = sorted(product_stats, key=lambda x: x["quantity_sold"], reverse=True)
+        top_rev = by_rev[0]
+        top_qty = by_qty[0]
         return (
-            f"Estimated cash & liquid balance is ₹{cash_balance:,.0f} "
-            f"(Opening Cash: ₹{shop.get('opening_cash', 0):,.0f} + Cash/UPI/Udhaar inflows − Expenses)."
-        )
-
-    if any(w in lower for w in ["today", "sale", "sales", "bikri", "revenue"]) and "forecast" not in lower:
-        sale_tx = [t for t in recent_tx if t["tx_type"] == "sale" and t["tx_date"] == datetime.now().strftime("%Y-%m-%d")]
-        return (
-            f"Today's recorded sales total ₹{sales_today:,.0f} across {len(sale_tx)} sale entry/entries, "
-            f"while cumulative recorded sales are ₹{all_sales:,.0f}."
+            f"Top revenue product: {top_rev['product_name']} (₹{top_rev['revenue']:,.0f} across {top_rev['sale_count']} sale(s)). "
+            f"Highest quantity sold: {top_qty['product_name']} ({top_qty['quantity_sold']:g} {top_qty['unit']})."
         )
 
     if any(w in lower for w in ["expense", "expenses", "kharcha", "rent", "electricity", "bill"]):
-        cat_map = {}
-        for t in recent_tx:
-            if t["tx_type"] == "expense":
-                cat_map[t["category"]] = cat_map.get(t["category"], 0) + t["amount"]
-        cats = ", ".join([f"{k}: ₹{v:,.0f}" for k, v in cat_map.items()]) if cat_map else "no recent category breakdown"
-        return f"Today's expenses are ₹{exp_today:,.0f} (Cumulative expenses: ₹{all_exp:,.0f}; recent breakdown: {cats})."
-
-    if any(w in lower for w in ["stock", "inventory", "low", "out of stock", "item", "product", "maalgadi"]):
-        if not products:
-            return "Your inventory list is currently empty. Add items in the Inventory tab or via Voice Entry to track stock automatically."
-        threshold = int(shop.get("low_stock_threshold") or 5)
-        out_items = [p for p in products if float(p["stock"]) <= 0]
-        low_items = [p for p in products if 0 < float(p["stock"]) <= int(p.get("low_stock_threshold") or threshold)]
-        all_items = ", ".join([f"{p['name']} ({p['stock']:g} {p['unit']} @ ₹{p['price']:g})" for p in products])
-        alerts = []
-        if out_items:
-            alerts.append("Out of stock: " + ", ".join([p["name"] for p in out_items]))
-        if low_items:
-            alerts.append("Low stock: " + ", ".join([f"{p['name']} ({p['stock']:g} {p['unit']})" for p in low_items]))
-        if alerts:
-            return f"{' | '.join(alerts)}. Full inventory: {all_items}."
-        return f"All items are well-stocked: {all_items}."
-
-    if any(w in lower for w in ["cash flow", "forecast", "predict", "next 7", "week", "future"]):
-        net = max(0.0, sales_today - exp_today)
         return (
-            f"At today's net pace of ₹{net:,.0f}/day, a 7-day baseline run-rate is ₹{net * 7:,.0f}. "
-            f"Collecting pending Udhaar can boost short-term liquidity."
+            f"Today's expenses are ₹{exp_today:,.0f}, this month's expenses are ₹{month_exp:,.0f}, "
+            f"and total cumulative expenses are ₹{all_exp:,.0f}."
         )
 
-    if any(w in lower for w in ["tip", "advice", "grow", "increase", "suggest", "help", "how to", "customer", "reminder"]):
+    if any(w in lower for w in ["stock", "inventory", "low", "out of stock", "restock", "item", "product", "available", "units of", "maalgadi"]):
+        if not products:
+            return "Your inventory list is currently empty. Add items in the Inventory tab or via Voice Entry to track stock."
+        for p in products:
+            pname = p["name"].lower()
+            if pname in lower or any(tok in lower for tok in pname.split() if len(tok) > 2):
+                stk = float(p.get("stock") or 0)
+                status = "Out of stock" if stk <= 0 else ("Low stock" if stk <= int(p.get("low_stock_threshold") or default_thresh) else "In stock")
+                return f"{p['name']} has {stk:g} {p['unit']} available ({status}, selling price ₹{float(p.get('price') or 0):g}/{p['unit']})."
+
+        if "out of stock" in lower:
+            if not out_items:
+                return "No products are currently out of stock."
+            return "Out-of-stock products: " + ", ".join([p["name"] for p in out_items]) + "."
+
+        if any(w in lower for w in ["low", "restock", "need restocking"]):
+            restock_list = [
+                f"{p['name']} ({float(p.get('stock') or 0):g} {p['unit']})"
+                for p in (out_items + low_items)
+            ]
+            if not restock_list:
+                return "No products need restocking right now — all items are above their low-stock threshold."
+            return "Products needing restock: " + ", ".join(restock_list) + "."
+
+        all_items = ", ".join([f"{p['name']}: {float(p.get('stock') or 0):g} {p['unit']}" for p in products])
+        return f"Current inventory ({len(products)} item(s)): {all_items}."
+
+    if any(w in lower for w in ["month", "monthly", "earn", "sale", "sales", "bikri", "revenue", "today"]):
+        if any(w in lower for w in ["month", "monthly", "earn"]):
+            return (
+                f"This month's recorded sales are ₹{month_sales:,.0f} (expenses: ₹{month_exp:,.0f}, net: ₹{month_sales - month_exp:,.0f}). "
+                f"Last month's sales were ₹{last_month_sales:,.0f}."
+            )
         return (
-            f"Practical tips for {store}: (1) Follow up politely on overdue Udhaar every 3–5 days, "
-            f"(2) Reorder fast-moving items before hitting low stock, and (3) Bundle high-margin daily essentials near checkout. "
-            f"You can also ask me for exact numbers on today's sales, profit, Udhaar, expenses, or stock!"
+            f"Today's sales are ₹{sales_today:,.0f}, this month's sales are ₹{month_sales:,.0f}, "
+            f"and total cumulative sales are ₹{all_sales:,.0f}."
+        )
+
+    if any(w in lower for w in ["tip", "tips", "advice", "grow", "increase", "improve", "suggest", "manage", "reduce", "help", "how to"]):
+        return (
+            f"Practical ideas for {store}: (1) Track fast-moving items and reorder before stock runs low so you don't miss sales; "
+            f"(2) Review recurring expenses like electricity, rent, and packaging regularly and negotiate bulk supplier rates; "
+            f"(3) Keep a clear due date and gentle reminder routine for pending Udhaar balances."
         )
 
     return (
-        f"Here is a quick snapshot for {store}: Today's Sales = ₹{sales_today:,.0f}, Today's Expenses = ₹{exp_today:,.0f}, "
-        f"Cash Balance = ₹{cash_balance:,.0f}, and {len(customers)} customer(s) in Udhaar book. "
-        f"Ask me any specific question about your shop, customers, stock, finances, or business growth!"
+        f"Here is the current data for {store}: Today's sales = ₹{sales_today:,.0f}, today's expenses = ₹{exp_today:,.0f}, "
+        f"this month's sales = ₹{month_sales:,.0f}, pending Udhaar = ₹{total_pending_udhaar:,.0f}, and {len(products)} inventory item(s). "
+        f"Let me know what specific detail you want to check!"
     )
 
 
@@ -1581,87 +1689,153 @@ def ask_assistant(payload: ChatRequest, user: dict = Depends(get_current_user)):
 
     conn = get_db()
     cur = conn.cursor()
-    today = datetime.now().strftime("%Y-%m-%d")
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    current_ym = now.strftime("%Y-%m")
+    first_of_this_month = now.replace(day=1)
+    prev_month_end = first_of_this_month - timedelta(days=1)
+    prev_ym = prev_month_end.strftime("%Y-%m")
     uid = user["id"]
 
     shop = ensure_user_shop(cur, user)
-    sales_today = cur.execute(
+    sales_today = float(cur.execute(
         "SELECT COALESCE(SUM(amount), 0) AS s FROM transactions WHERE user_id = ? AND tx_type = 'sale' AND tx_date = ?",
         (uid, today),
-    ).fetchone()["s"]
-    exp_today = cur.execute(
+    ).fetchone()["s"])
+    exp_today = float(cur.execute(
         "SELECT COALESCE(SUM(amount), 0) AS e FROM transactions WHERE user_id = ? AND tx_type = 'expense' AND tx_date = ?",
         (uid, today),
-    ).fetchone()["e"]
-    all_sales = cur.execute(
+    ).fetchone()["e"])
+    month_sales = float(cur.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS s FROM transactions WHERE user_id = ? AND tx_type = 'sale' AND strftime('%Y-%m', tx_date) = ?",
+        (uid, current_ym),
+    ).fetchone()["s"])
+    month_exp = float(cur.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS e FROM transactions WHERE user_id = ? AND tx_type = 'expense' AND strftime('%Y-%m', tx_date) = ?",
+        (uid, current_ym),
+    ).fetchone()["e"])
+    last_month_sales = float(cur.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS s FROM transactions WHERE user_id = ? AND tx_type = 'sale' AND strftime('%Y-%m', tx_date) = ?",
+        (uid, prev_ym),
+    ).fetchone()["s"])
+    all_sales = float(cur.execute(
         "SELECT COALESCE(SUM(amount), 0) AS s FROM transactions WHERE user_id = ? AND tx_type = 'sale'",
         (uid,),
-    ).fetchone()["s"]
-    all_exp = cur.execute(
+    ).fetchone()["s"])
+    all_exp = float(cur.execute(
         "SELECT COALESCE(SUM(amount), 0) AS e FROM transactions WHERE user_id = ? AND tx_type = 'expense'",
         (uid,),
-    ).fetchone()["e"]
-    all_cash_in = cur.execute(
+    ).fetchone()["e"])
+    all_cash_in = float(cur.execute(
         """SELECT COALESCE(SUM(amount), 0) AS total FROM transactions
            WHERE user_id = ? AND ((tx_type = 'sale' AND payment_method IN ('Cash', 'UPI')) OR tx_type = 'credit_payment')""",
         (uid,),
-    ).fetchone()["total"]
-    cash_balance = shop["opening_cash"] + all_cash_in - all_exp
+    ).fetchone()["total"])
+    cash_balance = float(shop["opening_cash"]) + all_cash_in - all_exp
     customers = [dict(r) for r in cur.execute("SELECT * FROM customers WHERE user_id = ?", (uid,)).fetchall()]
     products = [dict(r) for r in cur.execute("SELECT * FROM products WHERE user_id = ?", (uid,)).fetchall()]
-    recent_tx = [dict(r) for r in cur.execute("SELECT * FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT 15", (uid,)).fetchall()]
+    all_tx = [dict(r) for r in cur.execute("SELECT * FROM transactions WHERE user_id = ? ORDER BY id DESC", (uid,)).fetchall()]
+    recent_tx = all_tx[:15]
     conn.commit()
     conn.close()
 
-    lower_msg = msg.lower()
-    if any(k in lower_msg for k in ["record ", "add sale", "sold ", "add expense", "spent ", "credit sale"]) or (
-        ("udhaar" in lower_msg or "udhar" in lower_msg) and re.search(r"\d+", lower_msg) and any(v in lower_msg for v in ["add", "give", "gave", "record", "paid", "received"])
-    ):
-        try:
-            parsed = parse_voice_with_fallback(msg, products, customers)
-            if parsed.get("amount", 0) > 0:
-                saved = execute_parsed_action(parsed, uid)
-                return {
-                    "reply": f"✅ {saved.get('result_message') or 'Recorded entry.'}",
-                    "action_taken": True,
-                }
-        except HTTPException as he:
-            return {"reply": f"⚠️ {he.detail}", "action_taken": False}
+    product_stats = _compute_product_sales_stats(products, all_tx)
+    default_thresh = int(shop.get("low_stock_threshold") or 5)
+    low_stock_products = [
+        p for p in products
+        if 0 < float(p.get("stock") or 0) <= int(p.get("low_stock_threshold") or default_thresh)
+    ]
+    out_of_stock_products = [p for p in products if float(p.get("stock") or 0) <= 0]
+    pending_customers = [
+        {
+            "name": c["name"],
+            "phone": c.get("phone") or "",
+            "total_credit": float(c.get("total_credit") or 0),
+            "paid": float(c.get("paid") or 0),
+            "pending_amount": round(max(0.0, float(c.get("total_credit") or 0) - float(c.get("paid") or 0)), 2),
+            "due_date": c.get("due_date") or "",
+        }
+        for c in customers
+        if (float(c.get("total_credit") or 0) - float(c.get("paid") or 0)) > 0
+    ]
+    pending_customers.sort(key=lambda x: x["pending_amount"], reverse=True)
 
     client = get_gemini_client()
     if client:
         context = {
             "shop_name": shop["shop_name"],
             "owner_name": shop["owner_name"],
+            "current_date": today,
+            "current_month": current_ym,
+            "previous_month": prev_ym,
             "todays_sales": sales_today,
             "todays_expenses": exp_today,
             "todays_net_profit": sales_today - exp_today,
-            "all_sales": all_sales,
-            "all_expenses": all_exp,
+            "this_month_sales": month_sales,
+            "this_month_expenses": month_exp,
+            "this_month_net_profit": month_sales - month_exp,
+            "last_month_sales": last_month_sales,
+            "month_over_month_sales_diff": month_sales - last_month_sales,
+            "all_time_sales": all_sales,
+            "all_time_expenses": all_exp,
             "cash_balance": cash_balance,
-            "customers": customers,
+            "total_pending_udhaar": round(sum(c["pending_amount"] for c in pending_customers), 2),
+            "pending_customers": pending_customers,
+            "all_customers": customers,
             "products": products,
+            "low_stock_products": low_stock_products,
+            "out_of_stock_products": out_of_stock_products,
+            "product_sales_summary": product_stats,
             "recent_transactions": recent_tx,
         }
+        history_text = ""
+        if payload.history:
+            trimmed = payload.history[-8:]
+            history_text = "\n".join(
+                [f"{h.get('role', 'user').capitalize()}: {str(h.get('text', '')).strip()}" for h in trimmed if str(h.get('text', '')).strip()]
+            )
         try:
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
-                contents=f"""You are DukaanAI, a helpful financial and business assistant for {shop['owner_name']}'s store '{shop['shop_name']}'.
+                contents=f"""You are DukaanAI, a helpful, accurate, and conversational assistant for {shop['owner_name']}'s store '{shop['shop_name']}'.
 
-Answer any question asked by the shop owner accurately and helpfully using Indian Rupees (₹).
-When answering shop-specific questions, use this live shop data:
+Rules:
+1. Answer any question asked by the shop owner clearly and helpfully using Indian Rupees (₹), tolerating spelling mistakes, informal phrasing, or follow-up questions using conversation history.
+2. For shop-specific figures (sales, expenses, profit, month comparisons, top products, inventory, stock counts, Udhaar/customers), use ONLY the live database metrics in `Live Shop Data` below. Never invent or guess numbers or records.
+3. If data for a specific metric or item is not present in `Live Shop Data`, say so clearly and plainly.
+4. For general business, sales, inventory, expense, or small-shop management questions, give practical, grounded advice.
+
+Live Shop Data:
 {json.dumps(context)}
 
-Shopkeeper question: {msg}""",
+Recent Conversation:
+{history_text or "(none)"}
+
+Shopkeeper message: {msg}""",
             )
-            return {
-                "reply": response.text.strip(),
-                "action_taken": False,
-            }
+            reply_text = (response.text or "").strip()
+            if reply_text:
+                return {
+                    "reply": reply_text,
+                    "action_taken": False,
+                }
         except Exception as e:
             print("Gemini API Error:", e)
 
     reply = build_comprehensive_assistant_reply(
-        msg, shop, sales_today, exp_today, all_sales, all_exp, cash_balance, customers, products, recent_tx
+        msg,
+        shop,
+        sales_today,
+        exp_today,
+        month_sales,
+        month_exp,
+        last_month_sales,
+        all_sales,
+        all_exp,
+        cash_balance,
+        customers,
+        products,
+        recent_tx,
+        product_stats,
     )
     return {"reply": reply, "action_taken": False}

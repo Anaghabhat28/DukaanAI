@@ -91,19 +91,16 @@ function formatINR(val) {
 }
 
 export default function App() {
-  // Authentication & Route Guard State
-  const [authMode, setAuthMode] = useState("login"); // "login" | "register"
+  const [authMode, setAuthMode] = useState("login");
   const [currentUser, setCurrentUser] = useState(() => getStoredUser());
   const [authChecking, setAuthChecking] = useState(true);
 
-  // Login Form State
   const [loginForm, setLoginForm] = useState({ email: "", password: "" });
   const [loginShowPwd, setLoginShowPwd] = useState(false);
   const [loginErrors, setLoginErrors] = useState({});
   const [loginServerError, setLoginServerError] = useState("");
   const [authSubmitting, setAuthSubmitting] = useState(false);
 
-  // Registration Form State
   const [regForm, setRegForm] = useState({
     owner_name: "",
     email: "",
@@ -114,15 +111,12 @@ export default function App() {
   const [regErrors, setRegErrors] = useState({});
   const [regServerError, setRegServerError] = useState("");
 
-  // Logout Confirmation Modal State
   const [logoutModalOpen, setLogoutModalOpen] = useState(false);
 
-  // App State
   const [loading, setLoading] = useState(false);
   const [shop, setShop] = useState(null);
   const [activeTab, setActiveTab] = useState("dashboard");
 
-  // Profile form state
   const [profileForm, setProfileForm] = useState({
     shop_name: "",
     owner_name: "",
@@ -134,14 +128,12 @@ export default function App() {
   });
   const [profileSavedMsg, setProfileSavedMsg] = useState("");
 
-  // Dashboard & Data states
   const [dashboard, setDashboard] = useState(null);
   const [products, setProducts] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [transactions, setTransactions] = useState([]);
   const [reports, setReports] = useState({ expense_breakdown: [] });
 
-  // Sales form state (with Searchable Product Selection)
   const [paymentMethod, setPaymentMethod] = useState("Cash");
   const [productSearchQuery, setProductSearchQuery] = useState("");
   const [showProductDropdown, setShowProductDropdown] = useState(false);
@@ -154,30 +146,26 @@ export default function App() {
   const [dueDate, setDueDate] = useState("");
   const [lastReceipt, setLastReceipt] = useState(null);
 
-  // Udhaar Book state
   const [newCustName, setNewCustName] = useState("");
   const [newCustPhone, setNewCustPhone] = useState("");
   const [newCustCredit, setNewCustCredit] = useState("");
   const [newCustDue, setNewCustDue] = useState("");
   const [payAmounts, setPayAmounts] = useState({});
 
-  // Expenses form state
   const [expTitle, setExpTitle] = useState("");
   const [expCategory, setExpCategory] = useState("Electricity");
   const [expAmount, setExpAmount] = useState("");
   const [expMethod, setExpMethod] = useState("Cash");
 
-  // Inventory Management state
   const [prodName, setProdName] = useState("");
   const [prodUnit, setProdUnit] = useState("kg");
   const [prodPurchasePrice, setProdPurchasePrice] = useState("");
   const [prodPrice, setProdPrice] = useState("");
   const [prodStock, setProdStock] = useState("");
   const [inventorySearch, setInventorySearch] = useState("");
-  const [inventoryFilter, setInventoryFilter] = useState("all"); // "all" | "low" | "out"
+  const [inventoryFilter, setInventoryFilter] = useState("all");
   const [editingProduct, setEditingProduct] = useState(null);
 
-  // Assistant state
   const [chatInput, setChatInput] = useState("");
   const [chatSending, setChatSending] = useState(false);
   const [messages, setMessages] = useState([
@@ -187,11 +175,9 @@ export default function App() {
     },
   ]);
 
-  // Notifications state
   const [notifOpen, setNotifOpen] = useState(false);
   const [readNotifIds, setReadNotifIds] = useState([]);
 
-  // Multilingual Voice Assistant + Confirmation Preview State
   const [voiceLanguage, setVoiceLanguage] = useState("en-IN");
   const [isListening, setIsListening] = useState(false);
   const [voiceModalOpen, setVoiceModalOpen] = useState(false);
@@ -255,7 +241,6 @@ export default function App() {
     }
   }
 
-  // Verify existing session on load
   useEffect(() => {
     async function verifySession() {
       const token = getAuthToken();
@@ -278,7 +263,6 @@ export default function App() {
     verifySession();
   }, []);
 
-  // --- Registration & Login Handlers ---
   function validateRegistration() {
     const errs = {};
     if (!regForm.owner_name.trim() || regForm.owner_name.trim().length < 2) {
@@ -378,7 +362,6 @@ export default function App() {
     setAuthMode("login");
   }
 
-  // --- Notifications ---
   const threshold = Number(shop?.low_stock_threshold || 5);
   const notifications = useMemo(() => {
     const list = [];
@@ -425,7 +408,6 @@ export default function App() {
     setReadNotifIds(notifications.map((n) => n.id));
   }
 
-  // --- Multilingual Voice Recognition & Two-Step Confirmation ---
   async function analyzeVoiceTranscript(textToParse) {
     const cleaned = (textToParse || "").trim();
     if (!cleaned) {
@@ -437,7 +419,12 @@ export default function App() {
     setVoiceStatus("Recognizing command and extracting details...");
     try {
       const res = await api.parseVoiceCommand(cleaned, voiceLanguage);
-      setPendingVoiceAction(res.parsed);
+      const parsedAction = res.parsed ? { ...res.parsed } : null;
+      if (parsedAction && parsedAction.amount !== undefined && parsedAction.amount !== null) {
+        const numAmt = Number(parsedAction.amount);
+        parsedAction.amount = Number.isFinite(numAmt) ? numAmt : 0;
+      }
+      setPendingVoiceAction(parsedAction);
       setVoiceStatus("Review the extracted details below and confirm to save.");
     } catch (err) {
       setVoiceStatus(`⚠️ ${err.message}`);
@@ -450,8 +437,15 @@ export default function App() {
     if (!pendingVoiceAction) return;
     setVoiceParsing(true);
     try {
+      const payloadAction = {
+        ...pendingVoiceAction,
+        amount:
+          pendingVoiceAction.amount === undefined || pendingVoiceAction.amount === null
+            ? 0
+            : Number(pendingVoiceAction.amount),
+      };
       const res = await api.confirmVoiceAction(
-        pendingVoiceAction,
+        payloadAction,
         voiceTranscript,
         voiceLanguage
       );
@@ -545,7 +539,6 @@ export default function App() {
     recognition.start();
   }
 
-  // --- Profile & Shop Handlers ---
   async function handleProfileSave(e) {
     e.preventDefault();
     setProfileSavedMsg("");
@@ -577,7 +570,6 @@ export default function App() {
     }
   }
 
-  // --- Searchable Product Selection in Sales ---
   const matchingProducts = useMemo(() => {
     const q = productSearchQuery.trim().toLowerCase();
     if (!q) return products.slice(0, 8);
@@ -680,7 +672,6 @@ export default function App() {
     }
   }
 
-  // --- Udhaar & Expenses ---
   async function handleAddCustomer(e) {
     e.preventDefault();
     if (!newCustName.trim()) return;
@@ -737,7 +728,6 @@ export default function App() {
     }
   }
 
-  // --- Inventory Management Handlers ---
   async function handleAddProduct(e) {
     e.preventDefault();
     if (!prodName.trim() || Number(prodPrice || 0) < 0) {
@@ -825,15 +815,15 @@ export default function App() {
   }).length;
   const outOfStockCount = products.filter((p) => Number(p.stock) <= 0).length;
 
-  // --- Assistant Chat ---
   async function handleSendChat(textOverride) {
     const promptText = (typeof textOverride === "string" ? textOverride : chatInput).trim();
     if (!promptText || chatSending) return;
+    const updatedHistory = [...messages, { role: "user", text: promptText }];
     setChatInput("");
-    setMessages((prev) => [...prev, { role: "user", text: promptText }]);
+    setMessages(updatedHistory);
     setChatSending(true);
     try {
-      const res = await api.askAssistant(promptText);
+      const res = await api.askAssistant(promptText, updatedHistory.slice(-8));
       setMessages((prev) => [...prev, { role: "assistant", text: res.reply }]);
       if (res.action_taken) {
         await refreshAllData();
@@ -868,7 +858,6 @@ export default function App() {
     );
   }
 
-  // --- Unauthenticated View: Separate Creative Professional Login & Registration Pages ---
   if (!currentUser) {
     return (
       <div className="auth-wrapper">
@@ -1481,7 +1470,6 @@ export default function App() {
                   ))}
                 </div>
 
-                {/* Searchable Product Selection Field */}
                 <label className="field-label">Search Product or Enter Custom Item *</label>
                 <div className="product-search-wrap">
                   <div className="input-group" style={{ marginBottom: 0 }}>
@@ -1860,7 +1848,6 @@ export default function App() {
 
           {activeTab === "inventory" && (
             <div style={{ display: "grid", gap: 20 }}>
-              {/* Quick Add Product Form */}
               <form className="card" onSubmit={handleAddProduct}>
                 <div className="card-header">
                   <h3>Add Inventory Item</h3>
@@ -1948,7 +1935,6 @@ export default function App() {
                 </div>
               </form>
 
-              {/* Inventory List with Search, Stock Alerts & Quick Edit/Delete */}
               <div className="card">
                 <div className="card-header">
                   <div>
@@ -2294,7 +2280,6 @@ export default function App() {
         </main>
       </div>
 
-      {/* Edit Product Modal */}
       {editingProduct && (
         <div className="modal-backdrop" onClick={() => setEditingProduct(null)}>
           <form className="modal-card" onClick={(e) => e.stopPropagation()} onSubmit={handleSaveEditedProduct}>
@@ -2372,7 +2357,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Multilingual Voice Assistant Modal (Inventory + Sales + Confirmation Preview) */}
       {voiceModalOpen && (
         <div className="modal-backdrop" onClick={() => setVoiceModalOpen(false)}>
           <div className="modal-card" onClick={(e) => e.stopPropagation()}>
@@ -2387,7 +2371,6 @@ export default function App() {
               </button>
             </div>
 
-            {/* Regional Language Selector */}
             <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", marginBottom: 6, display: "flex", alignItems: "center", gap: 5 }}>
               <Globe size={14} color="#5b32d6" /> Select Preferred Language:
             </div>
@@ -2443,7 +2426,6 @@ export default function App() {
               </p>
             )}
 
-            {/* Extracted Details Confirmation Preview */}
             {pendingVoiceAction && (
               <div className="confirm-preview-box">
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -2581,7 +2563,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Logout Confirmation Modal */}
       {logoutModalOpen && (
         <div className="modal-backdrop" onClick={() => setLogoutModalOpen(false)}>
           <div className="modal-card" style={{ maxWidth: 400 }} onClick={(e) => e.stopPropagation()}>

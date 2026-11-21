@@ -111,9 +111,9 @@ export const api = {
         confirmed_action,
       }),
     }),
-  askAssistant: (message) =>
+  askAssistant: (message, history = []) =>
     request("/assistant", {
       method: "POST",
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, history }),
     }),
 };
